@@ -83,11 +83,15 @@ base_topic: home/heating
 
 ## Instalacja środowiska
 
-Skopiuj repo na Raspberry Pi:
+1. Skopiuj repo na Raspberry Pi:
 
 ```bash
 git clone <repo-url> /opt/ebus/ebus-thelia-condens-ha
 cd /opt/ebus/ebus-thelia-condens-ha
 
 ```
+2. Zainstaluj zależności Python:
+```shell
+pip3 install -r requirements.txt
 
+```
