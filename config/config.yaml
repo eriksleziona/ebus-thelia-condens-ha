@@ -8,6 +8,7 @@ mqtt:
 ebus:
   device: "/dev/serial0"
   baudrate: 2400
+  ebusctl_path: "/usr/bin/ebusctl"
 
 heater:
   name: "Thelia Condens"
@@ -16,4 +17,4 @@ heater:
 
 logging:
   level: "INFO"
-  file: "/var/log/thelia-ebus.log"
+  file: "/var/log/ebus-thelia-condens-ha.log"
