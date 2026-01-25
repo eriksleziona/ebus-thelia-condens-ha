@@ -11,13 +11,14 @@ class EbusReader:
         self.config = config
         self.logger = setup_logger(__name__)
         self.cache = {}
+        self.ebusctl_path = "/usr/bin/ebusctl"  # Updated path
 
     def read_value(self, circuit, message):
         """Read a specific value from ebusd."""
         try:
-            cmd = f"ebusctl read -c {circuit} {message}"
+            cmd = [self.ebusctl_path, "read", "-c", circuit, message]
             result = subprocess.run(
-                cmd.split(),
+                cmd,
                 capture_output=True,
                 text=True,
                 timeout=5
@@ -56,9 +57,9 @@ class EbusReader:
     def set_heating_temp(self, temperature):
         """Set heating target temperature."""
         try:
-            cmd = f"ebusctl write -c bai HeatingTemp {temperature}"
+            cmd = [self.ebusctl_path, "write", "-c", "bai", "HeatingTemp", str(temperature)]
             result = subprocess.run(
-                cmd.split(),
+                cmd,
                 capture_output=True,
                 text=True,
                 timeout=5
