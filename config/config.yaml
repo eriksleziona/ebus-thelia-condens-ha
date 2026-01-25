@@ -1,0 +1,19 @@
+mqtt:
+  broker: "localhost"
+  port: 1883
+  client_id: "thelia_heater"
+  base_topic: "homeassistant/climate/thelia"
+  discovery_prefix: "homeassistant"
+
+ebus:
+  device: "/dev/serial0"
+  baudrate: 2400
+
+heater:
+  name: "Thelia Condens"
+  manufacturer: "Saunier Duval"
+  model: "30+"
+
+logging:
+  level: "INFO"
+  file: "/var/log/thelia-ebus.log"
