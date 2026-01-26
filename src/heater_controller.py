@@ -1,11 +1,11 @@
 import time
-from src.ebus_reader import EbusReader
+from src.ebus_direct_reader import EbusDirectReader
 from src.mqtt_publisher import MQTTPublisher
 from src.utils.logger import setup_logger
 
 
 class HeaterController:
-    """Main controller for heater integration."""
+    """Main controller for heater integration using direct eBUS."""
 
     def __init__(self, config):
         self.config = config
@@ -15,12 +15,12 @@ class HeaterController:
             level=config.get('logging.level', 'INFO')
         )
 
-        self.ebus = EbusReader(config)
+        self.ebus = EbusDirectReader(config)
         self.mqtt = MQTTPublisher(config)
         self.mqtt.set_message_callback(self.handle_mqtt_message)
 
         self.running = False
-        self.update_interval = 30  # seconds
+        self.publish_interval = 10  # Publish every 10 seconds
 
     def handle_mqtt_message(self, topic, payload):
         """Handle incoming MQTT commands from Home Assistant."""
@@ -36,7 +36,6 @@ class HeaterController:
             elif topic == f"{base_topic}/mode/set":
                 mode = payload.lower()
                 self.logger.info(f"Mode change requested: {mode}")
-                # Implement mode changes based on your heater capabilities
                 self.mqtt.client.publish(f"{base_topic}/mode", mode)
 
         except Exception as e:
@@ -44,11 +43,16 @@ class HeaterController:
 
     def start(self):
         """Start the controller."""
-        self.logger.info("Starting Thelia eBUS MQTT controller")
+        self.logger.info("Starting Thelia eBUS Direct controller")
 
         # Connect to MQTT
         if not self.mqtt.connect():
             self.logger.error("Failed to connect to MQTT broker")
+            return False
+
+        # Start eBUS listener
+        if not self.ebus.start_listening():
+            self.logger.error("Failed to start eBUS listener")
             return False
 
         self.running = True
@@ -58,16 +62,27 @@ class HeaterController:
 
     def run_loop(self):
         """Main control loop."""
+        last_publish = 0
+
         while self.running:
             try:
-                # Read heater status
-                status = self.ebus.get_heater_status()
+                current_time = time.time()
 
-                # Publish to MQTT
-                self.mqtt.publish_state(status)
+                # Publish status at regular intervals
+                if current_time - last_publish >= self.publish_interval:
+                    # Get heater status
+                    status = self.ebus.get_heater_status()
 
-                # Wait for next update
-                time.sleep(self.update_interval)
+                    # Log status
+                    self.logger.info(f"Status: {status}")
+
+                    # Publish to MQTT
+                    self.mqtt.publish_state(status)
+
+                    last_publish = current_time
+
+                # Sleep briefly
+                time.sleep(1)
 
             except KeyboardInterrupt:
                 self.logger.info("Received shutdown signal")
@@ -81,4 +96,5 @@ class HeaterController:
         """Stop the controller."""
         self.logger.info("Stopping controller")
         self.running = False
+        self.ebus.stop_listening()
         self.mqtt.disconnect()

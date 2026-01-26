@@ -6,7 +6,7 @@ mqtt:
   discovery_prefix: "homeassistant"
 
 ebus:
-  device: "/dev/serial0"
+  device: "/dev/ttyS0"
   baudrate: 2400
   ebusctl_path: "/usr/bin/ebusctl"
 
