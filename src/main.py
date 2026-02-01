@@ -5,9 +5,9 @@ from datetime import datetime
 import paho.mqtt.publish as publish
 
 # ============= EDIT ONLY THESE =============
-MQTT_BROKER = "192.168.1.100"   # ← YOUR HA IP
-MQTT_USER = "mqtt"             # ← change if needed
-MQTT_PASS = "mqtt"             # ← change if needed
+MQTT_BROKER = "192.168.1.100"  # ← YOUR HA IP
+MQTT_USER = "mqtt"  # ← change if needed
+MQTT_PASS = "mqtt"  # ← change if needed
 # ===========================================
 
 SERIAL_PORT = "/dev/serial0"
@@ -30,14 +30,16 @@ while True:
 
                         # Flow temperature
                         if msg.startswith(b'\xB5\x08\x07\x00\x04') and len(msg) >= 15:
-                            temp = msg[9] + msg[10]/10.0
-                            publish.single("ebus/thelia/FlowTemp", f"{temp:.1f}", hostname=MQTT_BROKER, auth=auth, retain=True)
+                            temp = msg[9] + msg[10] / 10.0
+                            publish.single("ebus/thelia/FlowTemp", f"{temp:.1f}", hostname=MQTT_BROKER, auth=auth,
+                                           retain=True)
                             print(f"{datetime.now().strftime('%H:%M:%S')} → FlowTemp = {temp:.1f}°C")
 
                         # Return temperature
                         if msg.startswith(b'\xB5\x08\x07\x00\x05') and len(msg) >= 15:
-                            temp = msg[9] + msg[10]/10.0
-                            publish.single("ebus/thelia/ReturnTemp", f"{temp:.1f}", hostname=MQTT_BROKER, auth=auth, retain=True)
+                            temp = msg[9] + msg[10] / 10.0
+                            publish.single("ebus/thelia/ReturnTemp", f"{temp:.1f}", hostname=MQTT_BROKER, auth=auth,
+                                           retain=True)
 
                         # Status + Modulation
                         if msg.startswith(b'\xB5\x08\x07\x00\x18') and len(msg) >= 17:
