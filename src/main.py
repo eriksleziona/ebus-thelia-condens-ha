@@ -1,66 +1,136 @@
-#!/usr/bin/env python3
 import serial
 import time
-from datetime import datetime
-import paho.mqtt.publish as publish
+import json
+import logging
+import paho.mqtt.client as mqtt
+from paho.mqtt.enums import CallbackAPIVersion
 
-# ============= EDIT ONLY THESE =============
-MQTT_BROKER = "192.168.1.100"  # ← YOUR HA IP
-MQTT_USER = "mqtt"  # ← change if needed
-MQTT_PASS = "mqtt"  # ← change if needed
-# ===========================================
+# --- CONFIGURATION ---
+SERIAL_PORT = '/dev/ttyAMA0'
+BAUD_RATE = 2400
+MQTT_BROKER = "192.168.1.XXX"  # Change to your HA/Mosquitto IP
+MQTT_USER = "mqtt_user"  # Optional
+MQTT_PASS = "mqtt_password"  # Optional
+DEVICE_ID = "saunier_duval_boiler"
 
-SERIAL_PORT = "/dev/serial0"
-BAUDRATE = 2400
+# Logging setup
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
-ser = serial.Serial(SERIAL_PORT, BAUDRATE, timeout=0.1)
-print(f"{datetime.now().strftime('%H:%M:%S')} → Direct eBUS reader started – no ebusd needed")
+# --- MQTT SETUP ---
+# Using API Version 2 for paho-mqtt 2.0+ compatibility
+client = mqtt.Client(CallbackAPIVersion.VERSION2, client_id=f"{DEVICE_ID}_bridge")
+if MQTT_USER:
+    client.username_pw_set(MQTT_USER, MQTT_PASS)
 
-auth = {'username': MQTT_USER, 'password': MQTT_PASS} if MQTT_USER else None
-buffer = bytearray()
 
-while True:
+def publish_discovery():
+    """Configures entities in Home Assistant via MQTT Discovery"""
+    base_topic = f"homeassistant/sensor/{DEVICE_ID}"
+
+    sensors = {
+        "flow_temp": {"name": "Boiler Flow Temperature", "unit": "°C", "class": "temperature"},
+        "return_temp": {"name": "Boiler Return Temperature", "unit": "°C", "class": "temperature"},
+        "water_pressure": {"name": "Boiler Water Pressure", "unit": "bar", "class": "pressure"}
+    }
+
+    for key, config in sensors.items():
+        discovery_topic = f"{base_topic}_{key}/config"
+        payload = {
+            "name": config["name"],
+            "state_topic": f"ebus/{DEVICE_ID}/state",
+            "value_template": f"{{{{ value_json.{key} }}}}",
+            "unit_of_measurement": config["unit"],
+            "device_class": config["class"],
+            "unique_id": f"{DEVICE_ID}_{key}",
+            "device": {
+                "identifiers": [DEVICE_ID],
+                "name": "Saunier Duval Thelia Condens",
+                "manufacturer": "Saunier Duval"
+            }
+        }
+        client.publish(discovery_topic, json.dumps(payload), retain=True)
+    logger.info("Sent discovery payloads to Home Assistant")
+
+
+# --- EBUSD DECODING LOGIC ---
+def calculate_crc(data):
+    crc = 0
+    for byte in data:
+        crc ^= byte
+        for _ in range(8):
+            if crc & 0x80:
+                crc = (crc << 1) ^ 0x19
+            else:
+                crc <<= 1
+            crc &= 0xFF
+    return crc
+
+
+def process_status01(data_payload):
+    """Parses Saunier Duval B5 11 Status frame"""
+    if len(data_payload) < 9: return
+
+    state = {
+        "flow_temp": data_payload[1] / 2.0,
+        "return_temp": data_payload[2] / 2.0,
+        "water_pressure": data_payload[6] / 10.0
+    }
+
+    logger.info(f"Update: {state['flow_temp']}°C | {state['water_pressure']} bar")
+    client.publish(f"ebus/{DEVICE_ID}/state", json.dumps(state))
+
+
+# --- MAIN LOOP ---
+def main():
     try:
-        if ser.in_waiting:
-            data = ser.read(ser.in_waiting)
-            for b in data:
-                if b == 0xAA:
-                    if len(buffer) >= 11:
-                        msg = buffer
+        client.connect(MQTT_BROKER, 1883, 60)
+        client.loop_start()
+        publish_discovery()
 
-                        # Flow temperature
-                        if msg.startswith(b'\xB5\x08\x07\x00\x04') and len(msg) >= 15:
-                            temp = msg[9] + msg[10] / 10.0
-                            publish.single("ebus/thelia/FlowTemp", f"{temp:.1f}", hostname=MQTT_BROKER, auth=auth,
-                                           retain=True)
-                            print(f"{datetime.now().strftime('%H:%M:%S')} → FlowTemp = {temp:.1f}°C")
+        ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=0.1)
+        buffer = []
 
-                        # Return temperature
-                        if msg.startswith(b'\xB5\x08\x07\x00\x05') and len(msg) >= 15:
-                            temp = msg[9] + msg[10] / 10.0
-                            publish.single("ebus/thelia/ReturnTemp", f"{temp:.1f}", hostname=MQTT_BROKER, auth=auth,
-                                           retain=True)
+        logger.info("Service started. Listening for eBUS frames...")
 
-                        # Status + Modulation
-                        if msg.startswith(b'\xB5\x08\x07\x00\x18') and len(msg) >= 17:
-                            status = "ON" if msg[9] & 0x01 else "OFF"
-                            mod = msg[11]
-                            publish.single("ebus/thelia/Status", status, hostname=MQTT_BROKER, auth=auth, retain=True)
-                            publish.single("ebus/thelia/Modulation", mod, hostname=MQTT_BROKER, auth=auth, retain=True)
-                            print(f"{datetime.now().strftime('%H:%M:%S')} → Boiler {status}, Modulation {mod}%")
+        while True:
+            byte = ser.read(1)
+            if not byte: continue
+            val = ord(byte)
 
-                        # Flame
-                        if msg.startswith(b'\xB5\x08\x07\x00\x1A') and len(msg) >= 13:
-                            flame = "ON" if msg[9] > 0 else "OFF"
-                            publish.single("ebus/thelia/Flame", flame, hostname=MQTT_BROKER, auth=auth, retain=True)
+            if val == 0xAA:  # Sync byte
+                if len(buffer) > 5:
+                    # Check for Status01 pattern (10 08 b5 11 ...)
+                    if buffer[0:4] == [0x10, 0x08, 0xb5, 0x11]:
+                        # Extract the reply (starts after ACK and Length byte)
+                        try:
+                            # In your log, the reply starts with 0x09 (length)
+                            start_idx = buffer.index(0x09)
+                            process_status01(buffer[start_idx:])
+                        except ValueError:
+                            pass
+                buffer = []
+                continue
 
-                    buffer = bytearray()
-                buffer.append(b)
-    except:
-        time.sleep(5)
-        try:
-            ser.close()
-            ser.open()
-        except:
-            pass
-    time.sleep(0.001)
+            # Byte Destuffing
+            if val == 0xA9:
+                next_byte = ser.read(1)
+                if next_byte:
+                    nv = ord(next_byte)
+                    if nv == 0x00:
+                        buffer.append(0xA9)
+                    elif nv == 0x01:
+                        buffer.append(0xAA)
+                continue
+
+            buffer.append(val)
+
+    except KeyboardInterrupt:
+        logger.info("Stopping...")
+    finally:
+        ser.close()
+        client.loop_stop()
+
+
+if __name__ == "__main__":
+    main()
