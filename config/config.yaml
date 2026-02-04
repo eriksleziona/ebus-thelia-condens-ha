@@ -1,20 +1,27 @@
-mqtt:
-  broker: "localhost"
-  port: 1883
-  client_id: "thelia_heater"
-  base_topic: "homeassistant/climate/thelia"
-  discovery_prefix: "homeassistant"
+# eBus Thelia Condens Configuration
 
-ebus:
-  device: "/dev/ttyS0"
+connection:
+  port: /dev/ttyAMA0
   baudrate: 2400
-  ebusctl_path: "/usr/bin/ebusctl"
+  timeout: 0.1
+  reconnect_delay: 5.0
 
-heater:
-  name: "Thelia Condens"
-  manufacturer: "Saunier Duval"
-  model: "30+"
+parser:
+  max_age: 300  # Seconds before values are stale
 
 logging:
-  level: "INFO"
-  file: "/var/log/ebus-thelia-condens-ha.log"
+  level: INFO
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
+# Future: MQTT
+mqtt:
+  enabled: false
+  host: localhost
+  port: 1883
+  topic_prefix: ebus/thelia
+
+# Future: Database
+database:
+  enabled: false
+  path: /var/lib/ebus-thelia/history.db
+  retention_days: 1825  # 5 years
