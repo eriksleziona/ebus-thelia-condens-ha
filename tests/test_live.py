@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Live test of the parser."""
+"""Live test with improved output."""
 
 import sys
 import os
 import time
-from datetime import datetime
 
 # Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -16,7 +15,7 @@ from thelia.parser import TheliaParser, DataAggregator
 def main():
     PORT = "/dev/ttyAMA0"
 
-    print(f"Connecting to {PORT}...")
+    print(f"🔌 Connecting to {PORT}...")
 
     config = ConnectionConfig(port=PORT, baudrate=2400)
     connection = SerialConnection(config)
@@ -26,10 +25,10 @@ def main():
     parser.register_callback(aggregator.update)
 
     if not connection.connect():
-        print("Failed to connect!")
+        print("❌ Failed to connect!")
         return
 
-    print("Connected! Parsing messages...\n")
+    print("✅ Connected! Reading eBus data...\n")
     print("=" * 70)
 
     try:
@@ -43,30 +42,28 @@ def main():
             ts = msg.timestamp.strftime("%H:%M:%S")
 
             if msg.name == "unknown":
-                print(f"[{count:3d}] {ts} ❓ CMD:{msg.command[0]:02X}{msg.command[1]:02X}")
+                cmd = f"{msg.command[0]:02X}{msg.command[1]:02X}"
+                print(f"[{count:3d}] {ts} ❓ Unknown CMD:{cmd} data={msg.query_data.get('raw', '')}")
             else:
                 print(f"[{count:3d}] {ts} ✅ {msg}")
 
+            # Print sensor summary every 30 seconds
             if time.time() - last_summary > 30:
-                print("\n" + "-" * 50)
-                print("📊 Current Sensors:")
-                for key, data in aggregator.get_all_sensors().items():
-                    if "value" in data:
-                        print(f"   {key}: {data['value']} {data.get('unit', '')}")
-                print("-" * 50 + "\n")
+                aggregator.print_status()
                 last_summary = time.time()
 
-            if count >= 50:
+            if count >= 60:
                 break
 
     except KeyboardInterrupt:
-        print("\nInterrupted")
+        print("\n\n⚠️ Interrupted by user")
     finally:
         connection.disconnect()
 
-    print("\n" + "=" * 70)
-    print(f"Parsed {count} messages")
-    print(f"Stats: {parser.get_stats()}")
+    # Final summary
+    aggregator.print_status()
+
+    print(f"\n📈 Stats: {parser.get_stats()}")
 
 
 if __name__ == "__main__":
