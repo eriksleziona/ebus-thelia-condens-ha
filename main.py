@@ -1,203 +1,142 @@
 #!/usr/bin/env python3
 """
-eBus Thelia Condens - Main Entry Point
+eBus Thelia Condens - Main Application
 
-Reads eBus data from the C6 shield adapter and parses Thelia Condens messages.
+Reads eBus data from C6 adapter and provides parsed sensor values.
 """
 
-import asyncio
-import logging
-import signal
 import sys
+import signal
+import logging
+import time
 from pathlib import Path
-from datetime import datetime
-import yaml
-from typing import Optional
 
-from ebus_core.connection import (
-    ConnectionConfig,
-    ConnectionType,
-    create_connection,
-    EbusConnection
-)
-from ebus_core.telegram import TelegramParser
+import yaml
+
+from ebus_core.connection import SerialConnection, ConnectionConfig
 from thelia.parser import TheliaParser, MessageAggregator, ParsedMessage
 
 
-class EbusApplication:
-    """Main application class."""
+class EbusReader:
+    """Main eBus reader application."""
 
     def __init__(self, config_path: str = "config/config.yaml"):
         self.config = self._load_config(config_path)
         self._setup_logging()
 
-        self.logger = logging.getLogger(self.__class__.__name__)
-        self.connection: Optional[EbusConnection] = None
+        self.logger = logging.getLogger("EbusReader")
+
+        # Create components
+        conn_cfg = self._get_connection_config()
+        self.connection = SerialConnection(conn_cfg)
         self.parser = TheliaParser()
         self.aggregator = MessageAggregator(
-            max_age_seconds=self.config.get("parser", {}).get("max_value_age", 300)
+            max_age_seconds=self.config.get("parser", {}).get("max_age", 300)
         )
 
-        self._running = False
-        self._tasks = []
-
-        # Register aggregator as callback
+        # Wire up callbacks
+        self.connection.register_telegram_callback(self._on_telegram)
         self.parser.register_callback(self.aggregator.update)
-        # Register our own message handler
-        self.parser.register_callback(self._on_message)
+        self.parser.register_callback(self._on_parsed)
+
+        self._running = False
 
     def _load_config(self, path: str) -> dict:
-        """Load configuration from YAML file."""
+        """Load configuration."""
         config_path = Path(path)
         if config_path.exists():
             with open(config_path) as f:
-                return yaml.safe_load(f)
+                return yaml.safe_load(f) or {}
         return {}
 
-    def _setup_logging(self) -> None:
+    def _setup_logging(self):
         """Configure logging."""
-        log_config = self.config.get("logging", {})
-        level = getattr(logging, log_config.get("level", "INFO"))
+        log_cfg = self.config.get("logging", {})
+        level = getattr(logging, log_cfg.get("level", "INFO"))
 
         logging.basicConfig(
             level=level,
-            format=log_config.get(
-                "format",
-                "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-            )
+            format=log_cfg.get("format", "%(asctime)s - %(name)s - %(levelname)s - %(message)s")
         )
 
-        # File handler if specified
-        log_file = log_config.get("file")
-        if log_file:
-            Path(log_file).parent.mkdir(parents=True, exist_ok=True)
-            fh = logging.FileHandler(log_file)
-            fh.setLevel(level)
-            fh.setFormatter(logging.Formatter(log_config.get("format", "")))
-            logging.getLogger().addHandler(fh)
-
-    def _create_connection_config(self) -> ConnectionConfig:
+    def _get_connection_config(self) -> ConnectionConfig:
         """Create connection config from settings."""
-        conn_cfg = self.config.get("connection", {})
-
-        conn_type = ConnectionType(conn_cfg.get("type", "serial"))
-
+        conn = self.config.get("connection", {})
         return ConnectionConfig(
-            type=conn_type,
-            port=conn_cfg.get("port", "/dev/ttyAMA0"),
-            baudrate=conn_cfg.get("baudrate", 2400),
-            host=conn_cfg.get("host", "localhost"),
-            tcp_port=conn_cfg.get("tcp_port", 8888),
-            timeout=conn_cfg.get("timeout", 1.0),
-            reconnect_delay=conn_cfg.get("reconnect_delay", 5.0)
+            port=conn.get("port", "/dev/ttyAMA0"),
+            baudrate=conn.get("baudrate", 2400),
+            timeout=conn.get("timeout", 0.1),
+            reconnect_delay=conn.get("reconnect_delay", 5.0)
         )
 
-    def _on_message(self, message: ParsedMessage) -> None:
+    def _on_telegram(self, telegram):
+        """Handle raw telegram."""
+        self.parser.parse(telegram)
+
+    def _on_parsed(self, message: ParsedMessage):
         """Handle parsed message."""
-        if message.valid and message.name != "unknown":
+        if message.valid and message.name not in ("unknown", "invalid"):
             self.logger.info(f"📨 {message}")
-        elif message.name == "unknown":
-            self.logger.debug(f"Unknown message: {message.command}")
 
-    async def _read_loop(self) -> None:
-        """Main read loop."""
-        conn_config = self._create_connection_config()
+    def run(self):
+        """Run the reader."""
+        self.logger.info("🚀 Starting eBus Thelia reader...")
 
-        while self._running:
-            try:
-                # Create and connect
-                self.connection = create_connection(conn_config)
+        if not self.connection.connect():
+            self.logger.error("Failed to connect")
+            return False
 
-                if not await self.connection.connect():
-                    self.logger.error("Connection failed, retrying...")
-                    await asyncio.sleep(conn_config.reconnect_delay)
-                    continue
-
-                self.logger.info("Connected, starting read loop...")
-
-                # Read telegrams
-                async for raw_telegram in self.connection.read_loop():
-                    if not self._running:
-                        break
-
-                    timestamp = datetime.now().timestamp()
-                    self.parser.parse_raw(raw_telegram, timestamp)
-
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                self.logger.error(f"Error in read loop: {e}")
-                await asyncio.sleep(conn_config.reconnect_delay)
-            finally:
-                if self.connection:
-                    await self.connection.disconnect()
-
-    async def _status_loop(self) -> None:
-        """Periodic status reporting."""
-        while self._running:
-            await asyncio.sleep(60)
-
-            stats = self.parser.get_stats()
-            values = self.aggregator.get_flat_values()
-
-            self.logger.info(
-                f"📊 Stats: telegrams={stats['total_telegrams']}, "
-                f"ok={stats['parsed_ok']}, errors={stats['parse_errors']}, "
-                f"unknown={stats['unknown_messages']}"
-            )
-
-            if values:
-                self.logger.info(f"📈 Current values: {len(values)} sensors active")
-                for key, value in list(values.items())[:5]:  # Show first 5
-                    self.logger.info(f"   {key}: {value}")
-
-    async def run(self) -> None:
-        """Run the application."""
         self._running = True
+        last_stats = time.time()
 
-        self.logger.info("🚀 Starting eBus Thelia Condens reader...")
-
-        # Create tasks
-        self._tasks = [
-            asyncio.create_task(self._read_loop()),
-            asyncio.create_task(self._status_loop()),
-        ]
-
-        # Wait for all tasks
         try:
-            await asyncio.gather(*self._tasks)
-        except asyncio.CancelledError:
-            pass
+            while self._running:
+                self.connection.read_telegrams()
 
-    async def stop(self) -> None:
-        """Stop the application."""
-        self.logger.info("Stopping...")
+                # Periodic stats
+                if time.time() - last_stats > 60:
+                    stats = self.parser.get_stats()
+                    values = self.aggregator.get_flat()
+                    self.logger.info(
+                        f"📊 Stats: total={stats['total']}, "
+                        f"parsed={stats['parsed']}, unknown={stats['unknown']}"
+                    )
+                    self.logger.info(f"📈 Active sensors: {len(values)}")
+                    last_stats = time.time()
+
+                time.sleep(0.01)
+
+        except KeyboardInterrupt:
+            self.logger.info("Interrupted")
+        finally:
+            self.stop()
+
+        return True
+
+    def stop(self):
+        """Stop the reader."""
         self._running = False
-
-        for task in self._tasks:
-            task.cancel()
-
-        if self.connection:
-            await self.connection.disconnect()
-
+        self.connection.disconnect()
         self.logger.info("Stopped")
 
+    def get_current_values(self) -> dict:
+        """Get current sensor values."""
+        return self.aggregator.get_all()
 
-async def main():
-    """Main entry point."""
-    app = EbusApplication()
+
+def main():
+    reader = EbusReader()
 
     # Handle signals
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, lambda: asyncio.create_task(app.stop()))
+    def handle_signal(sig, frame):
+        reader.stop()
+        sys.exit(0)
 
-    await app.run()
+    signal.signal(signal.SIGINT, handle_signal)
+    signal.signal(signal.SIGTERM, handle_signal)
+
+    reader.run()
 
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("\nInterrupted")
-        sys.exit(0)
+    main()

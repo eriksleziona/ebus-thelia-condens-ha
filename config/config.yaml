@@ -1,45 +1,27 @@
 # eBus Thelia Condens Configuration
 
 connection:
-  type: serial  # serial, ebusd, or tcp
-  port: /dev/ttyAMA0  # Serial port for direct connection
+  port: /dev/ttyAMA0
   baudrate: 2400
-  # For ebusd connection:
-  # host: localhost
-  # tcp_port: 8888
-  timeout: 1.0
+  timeout: 0.1
   reconnect_delay: 5.0
 
 parser:
-  max_value_age: 300  # Seconds before values are considered stale
+  max_age: 300  # Seconds before values are stale
 
 logging:
   level: INFO
   format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-  file: /var/log/ebus-thelia/ebus.log
 
-# MQTT Configuration (for later)
+# Future: MQTT
 mqtt:
   enabled: false
   host: localhost
   port: 1883
-  username: ""
-  password: ""
-  topic_prefix: "ebus/thelia"
-  discovery_prefix: "homeassistant"
-  publish_interval: 30
+  topic_prefix: ebus/thelia
 
-# Database Configuration (for later)
+# Future: Database
 database:
   enabled: false
-  type: sqlite  # sqlite, postgresql, influxdb
   path: /var/lib/ebus-thelia/history.db
   retention_days: 1825  # 5 years
-
-# Device-specific settings
-thelia:
-  # Known device addresses on your bus
-  boiler_address: 0x08
-  thermostat_address: 0x10
-  # Scan interval for active queries (if supported)
-  scan_interval: 60

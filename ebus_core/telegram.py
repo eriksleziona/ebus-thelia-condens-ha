@@ -4,28 +4,30 @@ eBus Telegram structure and parsing.
 
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Optional, List
+from typing import Optional
 import logging
+import time
 
 from .crc import EbusCRC
+
 
 logger = logging.getLogger(__name__)
 
 
 class TelegramType(Enum):
     """eBus telegram types."""
-    BROADCAST = auto()  # BC - No response expected
+    BROADCAST = auto()      # BC - No response expected
     MASTER_MASTER = auto()  # MM - Master to Master
-    MASTER_SLAVE = auto()  # MS - Master to Slave with response
+    MASTER_SLAVE = auto()   # MS - Master to Slave with response
 
 
-class EscapeSequence:
+class EscapeHandler:
     """eBus escape sequence handling."""
+
     ESCAPE = 0xA9
     SYNC = 0xAA
-
-    ESCAPE_ESCAPE = 0x00  # 0xA9 0x00 -> 0xA9
-    ESCAPE_SYNC = 0x01  # 0xA9 0x01 -> 0xAA
+    ESCAPE_ESCAPE = 0x00   # 0xA9 0x00 -> 0xA9
+    ESCAPE_SYNC = 0x01     # 0xA9 0x01 -> 0xAA
 
     @classmethod
     def unescape(cls, data: bytes) -> bytes:
@@ -39,8 +41,10 @@ class EscapeSequence:
                 elif data[i + 1] == cls.ESCAPE_SYNC:
                     result.append(cls.SYNC)
                 else:
+                    # Invalid escape, keep as-is
                     result.append(data[i])
-                    result.append(data[i + 1])
+                    i += 1
+                    continue
                 i += 2
             else:
                 result.append(data[i])
@@ -49,7 +53,7 @@ class EscapeSequence:
 
     @classmethod
     def escape(cls, data: bytes) -> bytes:
-        """Add escape sequences to data."""
+        """Add escape sequences to data for transmission."""
         result = bytearray()
         for byte in data:
             if byte == cls.ESCAPE:
@@ -74,8 +78,10 @@ class EbusTelegram:
     - NN: Data length (1 byte)
     - DB1..DBn: Data bytes (NN bytes)
     - CRC: CRC of QQ to DBn (1 byte)
-    - ACK: Acknowledgment (for MS/MM telegrams)
-    - NN2: Slave response length (for MS telegrams)
+
+    For Master-Slave:
+    - ACK: Acknowledgment from slave
+    - NN2: Slave response length
     - DB1..DBm: Slave response data
     - CRC2: Slave CRC
     - ACK2: Master acknowledgment
@@ -90,17 +96,22 @@ class EbusTelegram:
     crc: int = 0
 
     # Slave response (for MS telegrams)
+    slave_ack: Optional[int] = None
     response_data: Optional[bytes] = None
     response_crc: Optional[int] = None
+    master_ack: Optional[int] = None
 
     # Metadata
     telegram_type: TelegramType = TelegramType.BROADCAST
     valid: bool = False
+    crc_valid: bool = False
     raw_bytes: bytes = field(default_factory=bytes)
-    timestamp: float = 0.0
+    timestamp: float = field(default_factory=time.time)
 
-    # Known broadcast address
+    # Constants
     BROADCAST_ADDR = 0xFE
+    ACK = 0x00
+    NAK = 0xFF
 
     @property
     def command(self) -> tuple:
@@ -109,43 +120,105 @@ class EbusTelegram:
 
     @property
     def command_hex(self) -> str:
-        """Return command as hex string."""
+        """Return command as hex string like '0507'."""
         return f"{self.primary_command:02X}{self.secondary_command:02X}"
 
+    @property
+    def source_hex(self) -> str:
+        """Return source address as hex string."""
+        return f"{self.source:02X}"
+
+    @property
+    def destination_hex(self) -> str:
+        """Return destination address as hex string."""
+        return f"{self.destination:02X}"
+
     def __repr__(self) -> str:
+        status = "✓" if self.valid else "✗"
         return (
-            f"EbusTelegram(src={self.source:02X}, dst={self.destination:02X}, "
-            f"cmd={self.command_hex}, data={self.data.hex()}, valid={self.valid})"
+            f"EbusTelegram[{status}](src=0x{self.source:02X}, dst=0x{self.destination:02X}, "
+            f"cmd={self.command_hex}, len={len(self.data)}, data={self.data.hex()})"
         )
 
 
 class TelegramParser:
-    """Parser for eBus telegrams."""
+    """
+    Parser for eBus telegrams.
+
+    Handles both raw byte streams and individual telegram extraction.
+    """
 
     SYNC_BYTE = 0xAA
-    ACK = 0x00
-    NAK = 0xFF
+    MIN_TELEGRAM_LENGTH = 6  # QQ ZZ PB SB NN CRC (with NN=0)
 
     def __init__(self):
         self._buffer = bytearray()
         self._logger = logging.getLogger(self.__class__.__name__)
 
-    def parse(self, raw_data: bytes, timestamp: float = 0.0) -> Optional[EbusTelegram]:
+    def feed(self, data: bytes) -> list:
+        """
+        Feed raw bytes into the parser.
+
+        Args:
+            data: Raw bytes from eBus
+
+        Returns:
+            List of complete telegrams extracted
+        """
+        self._buffer.extend(data)
+        return self._extract_telegrams()
+
+    def _extract_telegrams(self) -> list:
+        """Extract complete telegrams from buffer."""
+        telegrams = []
+
+        while True:
+            # Skip leading SYNC bytes
+            while len(self._buffer) > 0 and self._buffer[0] == self.SYNC_BYTE:
+                self._buffer.pop(0)
+
+            if len(self._buffer) == 0:
+                break
+
+            # Find next SYNC byte
+            try:
+                sync_pos = self._buffer.index(self.SYNC_BYTE)
+            except ValueError:
+                # No SYNC found, need more data
+                # But prevent buffer overflow
+                if len(self._buffer) > 512:
+                    self._buffer = self._buffer[-256:]
+                break
+
+            if sync_pos > 0:
+                raw_telegram = bytes(self._buffer[:sync_pos])
+                self._buffer = self._buffer[sync_pos:]
+
+                telegram = self.parse(raw_telegram)
+                if telegram:
+                    telegrams.append(telegram)
+
+        return telegrams
+
+    def parse(self, raw_data: bytes, timestamp: float = None) -> Optional[EbusTelegram]:
         """
         Parse raw bytes into an EbusTelegram.
 
         Args:
-            raw_data: Raw bytes from eBus (unescaped)
-            timestamp: Timestamp when data was received
+            raw_data: Raw bytes (between SYNC bytes, escaped)
+            timestamp: Optional timestamp
 
         Returns:
             Parsed telegram or None if invalid
         """
-        try:
-            # Unescape the data first
-            data = EscapeSequence.unescape(raw_data)
+        if timestamp is None:
+            timestamp = time.time()
 
-            if len(data) < 6:  # Minimum: QQ ZZ PB SB NN CRC
+        try:
+            # Unescape the data
+            data = EscapeHandler.unescape(raw_data)
+
+            if len(data) < self.MIN_TELEGRAM_LENGTH:
                 self._logger.debug(f"Telegram too short: {len(data)} bytes")
                 return None
 
@@ -161,43 +234,84 @@ class TelegramParser:
             # Data length
             data_length = data[4]
 
-            if len(data) < 6 + data_length:
-                self._logger.debug(f"Incomplete telegram data")
+            # Check if we have enough bytes
+            expected_len = 5 + data_length + 1  # header + data + crc
+            if len(data) < expected_len:
+                self._logger.debug(
+                    f"Incomplete telegram: have {len(data)}, need {expected_len}"
+                )
                 return None
 
             # Extract data bytes
             telegram.data = bytes(data[5:5 + data_length])
 
-            # CRC position
+            # CRC
             crc_pos = 5 + data_length
             telegram.crc = data[crc_pos]
 
-            # Verify CRC
+            # Verify CRC (over QQ to last data byte)
             crc_data = bytes(data[:crc_pos])
             expected_crc = EbusCRC.calculate(crc_data)
+            telegram.crc_valid = (telegram.crc == expected_crc)
 
-            if telegram.crc != expected_crc:
-                self._logger.warning(
-                    f"CRC mismatch: got {telegram.crc:02X}, expected {expected_crc:02X}"
+            if not telegram.crc_valid:
+                self._logger.debug(
+                    f"CRC mismatch: got 0x{telegram.crc:02X}, "
+                    f"expected 0x{expected_crc:02X}"
                 )
-                telegram.valid = False
-                return telegram
 
             # Determine telegram type
             if telegram.destination == EbusTelegram.BROADCAST_ADDR:
                 telegram.telegram_type = TelegramType.BROADCAST
             else:
                 # Check for slave response
-                if len(data) > crc_pos + 1:
-                    # Has more data - could be MS with response
+                remaining = data[crc_pos + 1:]
+                if len(remaining) > 0:
                     telegram.telegram_type = TelegramType.MASTER_SLAVE
-                    # TODO: Parse slave response
+                    self._parse_slave_response(telegram, remaining)
                 else:
                     telegram.telegram_type = TelegramType.MASTER_MASTER
 
-            telegram.valid = True
+            telegram.valid = telegram.crc_valid
             return telegram
 
         except Exception as e:
             self._logger.error(f"Error parsing telegram: {e}")
             return None
+
+    def _parse_slave_response(self, telegram: EbusTelegram, data: bytes) -> None:
+        """Parse slave response portion of telegram."""
+        if len(data) < 1:
+            return
+
+        telegram.slave_ack = data[0]
+
+        if telegram.slave_ack != EbusTelegram.ACK:
+            return
+
+        if len(data) < 2:
+            return
+
+        response_len = data[1]
+
+        if len(data) < 2 + response_len + 1:
+            return
+
+        telegram.response_data = bytes(data[2:2 + response_len])
+        telegram.response_crc = data[2 + response_len]
+
+        # Verify response CRC
+        response_crc_data = bytes([data[1]]) + telegram.response_data
+        expected_crc = EbusCRC.calculate(response_crc_data)
+
+        if telegram.response_crc != expected_crc:
+            self._logger.debug("Slave response CRC mismatch")
+            telegram.valid = False
+
+        # Master ACK
+        if len(data) > 2 + response_len + 1:
+            telegram.master_ack = data[2 + response_len + 1]
+
+    def reset(self) -> None:
+        """Clear the internal buffer."""
+        self._buffer.clear()

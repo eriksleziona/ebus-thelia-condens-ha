@@ -1,95 +1,72 @@
 """
-eBus serial connection handler.
-Supports both direct serial and ebusd adapter connections.
+eBus serial connection handler for C6 adapter.
 """
 
 import serial
-import asyncio
 import logging
-from abc import ABC, abstractmethod
-from typing import AsyncIterator, Optional, Callable
+import time
 from dataclasses import dataclass
 from enum import Enum
-import time
+from typing import Optional, Generator, Callable, List
+from threading import Thread, Event
+
+from .telegram import TelegramParser, EbusTelegram
 
 
 class ConnectionType(Enum):
     """Connection type enumeration."""
     SERIAL = "serial"
-    EBUSD = "ebusd"
-    TCP = "tcp"
 
 
 @dataclass
 class ConnectionConfig:
     """Connection configuration."""
     type: ConnectionType = ConnectionType.SERIAL
-    port: str = "/dev/ttyUSB0"
+    port: str = "/dev/ttyAMA0"
     baudrate: int = 2400
-    host: str = "localhost"
-    tcp_port: int = 8888
-    timeout: float = 1.0
+    timeout: float = 0.1
     reconnect_delay: float = 5.0
 
 
-class EbusConnection(ABC):
-    """Abstract base class for eBus connections."""
+class SerialConnection:
+    """
+    Serial connection to eBus C6 adapter.
+
+    Handles:
+    - Connection management
+    - Raw byte reading
+    - Telegram extraction via parser
+    - Reconnection on failure
+    """
 
     def __init__(self, config: ConnectionConfig):
         self.config = config
         self.logger = logging.getLogger(self.__class__.__name__)
+
+        self._serial: Optional[serial.Serial] = None
+        self._parser = TelegramParser()
         self._connected = False
-        self._callbacks: list[Callable[[bytes], None]] = []
+
+        # Callbacks
+        self._telegram_callbacks: List[Callable[[EbusTelegram], None]] = []
+        self._raw_callbacks: List[Callable[[bytes], None]] = []
+
+        # Background reading
+        self._read_thread: Optional[Thread] = None
+        self._stop_event = Event()
 
     @property
     def connected(self) -> bool:
-        return self._connected
+        """Check if connected."""
+        return self._connected and self._serial and self._serial.is_open
 
-    @abstractmethod
-    async def connect(self) -> bool:
-        """Establish connection."""
-        pass
+    def connect(self) -> bool:
+        """
+        Open serial port connection.
 
-    @abstractmethod
-    async def disconnect(self) -> None:
-        """Close connection."""
-        pass
-
-    @abstractmethod
-    async def read_telegram(self) -> Optional[bytes]:
-        """Read a single telegram from the bus."""
-        pass
-
-    @abstractmethod
-    async def write(self, data: bytes) -> bool:
-        """Write data to the bus."""
-        pass
-
-    def register_callback(self, callback: Callable[[bytes], None]) -> None:
-        """Register a callback for incoming data."""
-        self._callbacks.append(callback)
-
-    async def read_loop(self) -> AsyncIterator[bytes]:
-        """Async generator yielding telegrams."""
-        while self._connected:
-            telegram = await self.read_telegram()
-            if telegram:
-                yield telegram
-
-
-class SerialConnection(EbusConnection):
-    """Direct serial connection to eBus adapter."""
-
-    SYNC_BYTE = 0xAA
-
-    def __init__(self, config: ConnectionConfig):
-        super().__init__(config)
-        self._serial: Optional[serial.Serial] = None
-        self._buffer = bytearray()
-        self._read_lock = asyncio.Lock()
-
-    async def connect(self) -> bool:
-        """Open serial port connection."""
+        Returns:
+            True if connection successful
+        """
         try:
             self._serial = serial.Serial(
                 port=self.config.port,
@@ -100,164 +77,149 @@ class SerialConnection(EbusConnection):
                 timeout=self.config.timeout
             )
             self._connected = True
-            self.logger.info(f"Connected to {self.config.port}")
+            self._parser.reset()
+            self.logger.info(f"Connected to {self.config.port} at {self.config.baudrate} baud")
             return True
+
         except serial.SerialException as e:
-            self.logger.error(f"Failed to connect: {e}")
+            self.logger.error(f"Failed to connect to {self.config.port}: {e}")
             self._connected = False
             return False
 
-    async def disconnect(self) -> None:
+    def disconnect(self) -> None:
         """Close serial connection."""
+        self._stop_event.set()
+
+        if self._read_thread and self._read_thread.is_alive():
+            self._read_thread.join(timeout=2.0)
+
         if self._serial and self._serial.is_open:
             self._serial.close()
+
         self._connected = False
         self.logger.info("Disconnected")
 
-    async def read_telegram(self) -> Optional[bytes]:
+    def register_telegram_callback(self, callback: Callable[[EbusTelegram], None]) -> None:
+        """Register callback for parsed telegrams."""
+        self._telegram_callbacks.append(callback)
+
+    def register_raw_callback(self, callback: Callable[[bytes], None]) -> None:
+        """Register callback for raw bytes."""
+        self._raw_callbacks.append(callback)
+
+    def read_raw(self) -> Optional[bytes]:
         """
-        Read a complete telegram from the serial port.
-        Telegrams are delimited by SYNC bytes (0xAA).
+        Read available raw bytes from serial port.
+
+        Returns:
+            Bytes read or None if error/no data
         """
-        if not self._serial or not self._serial.is_open:
+        if not self.connected:
             return None
 
-        async with self._read_lock:
-            try:
-                # Read available bytes
-                loop = asyncio.get_event_loop()
-
-                # Use run_in_executor for blocking serial read
-                available = await loop.run_in_executor(
-                    None, lambda: self._serial.in_waiting
-                )
-
-                if available > 0:
-                    data = await loop.run_in_executor(
-                        None, lambda: self._serial.read(available)
-                    )
-                    self._buffer.extend(data)
-
-                # Look for complete telegram between SYNC bytes
-                return self._extract_telegram()
-
-            except serial.SerialException as e:
-                self.logger.error(f"Read error: {e}")
-                self._connected = False
-                return None
-
-    def _extract_telegram(self) -> Optional[bytes]:
-        """Extract a complete telegram from the buffer."""
-        # Find SYNC bytes
-        while len(self._buffer) > 0 and self._buffer[0] == self.SYNC_BYTE:
-            self._buffer.pop(0)
-
-        # Look for next SYNC byte (end of telegram)
         try:
-            sync_pos = self._buffer.index(self.SYNC_BYTE)
-            if sync_pos > 0:
-                telegram = bytes(self._buffer[:sync_pos])
-                self._buffer = self._buffer[sync_pos:]
-                return telegram
-        except ValueError:
-            pass  # No SYNC found yet
+            if self._serial.in_waiting > 0:
+                data = self._serial.read(self._serial.in_waiting)
+                return data
+            return None
 
-        # Prevent buffer overflow
-        if len(self._buffer) > 1024:
-            self._buffer = self._buffer[-512:]
-
-        return None
-
-    async def write(self, data: bytes) -> bool:
-        """Write data to serial port."""
-        if not self._serial or not self._serial.is_open:
-            return False
-
-        try:
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(
-                None, lambda: self._serial.write(data)
-            )
-            return True
         except serial.SerialException as e:
-            self.logger.error(f"Write error: {e}")
-            return False
-
-
-class EbusdConnection(EbusConnection):
-    """Connection through ebusd daemon."""
-
-    def __init__(self, config: ConnectionConfig):
-        super().__init__(config)
-        self._reader: Optional[asyncio.StreamReader] = None
-        self._writer: Optional[asyncio.StreamWriter] = None
-
-    async def connect(self) -> bool:
-        """Connect to ebusd TCP port."""
-        try:
-            self._reader, self._writer = await asyncio.open_connection(
-                self.config.host,
-                self.config.tcp_port
-            )
-            self._connected = True
-            self.logger.info(f"Connected to ebusd at {self.config.host}:{self.config.tcp_port}")
-            return True
-        except Exception as e:
-            self.logger.error(f"Failed to connect to ebusd: {e}")
-            return False
-
-    async def disconnect(self) -> None:
-        """Disconnect from ebusd."""
-        if self._writer:
-            self._writer.close()
-            await self._writer.wait_closed()
-        self._connected = False
-
-    async def read_telegram(self) -> Optional[bytes]:
-        """Read from ebusd (line-based protocol)."""
-        if not self._reader:
-            return None
-
-        try:
-            line = await asyncio.wait_for(
-                self._reader.readline(),
-                timeout=self.config.timeout
-            )
-            return line.strip() if line else None
-        except asyncio.TimeoutError:
-            return None
-        except Exception as e:
             self.logger.error(f"Read error: {e}")
             self._connected = False
             return None
 
-    async def write(self, data: bytes) -> bool:
-        """Send command to ebusd."""
-        if not self._writer:
-            return False
+    def read_telegrams(self) -> List[EbusTelegram]:
+        """
+        Read and parse available telegrams.
 
-        try:
-            self._writer.write(data + b'\n')
-            await self._writer.drain()
-            return True
-        except Exception as e:
-            self.logger.error(f"Write error: {e}")
-            return False
+        Returns:
+            List of parsed telegrams
+        """
+        raw = self.read_raw()
+        if raw:
+            # Notify raw callbacks
+            for callback in self._raw_callbacks:
+                try:
+                    callback(raw)
+                except Exception as e:
+                    self.logger.error(f"Raw callback error: {e}")
 
-    async def send_command(self, command: str) -> Optional[str]:
-        """Send a command to ebusd and get response."""
-        if await self.write(command.encode()):
-            response = await self.read_telegram()
-            if response:
-                return response.decode('utf-8', errors='ignore')
-        return None
+            # Parse telegrams
+            telegrams = self._parser.feed(raw)
+
+            # Notify telegram callbacks
+            for telegram in telegrams:
+                for callback in self._telegram_callbacks:
+                    try:
+                        callback(telegram)
+                    except Exception as e:
+                        self.logger.error(f"Telegram callback error: {e}")
+
+            return telegrams
+
+        return []
+
+    def telegram_generator(self) -> Generator[EbusTelegram, None, None]:
+        """
+        Generator that yields telegrams as they arrive.
+
+        Yields:
+            EbusTelegram objects
+        """
+        while self.connected:
+            telegrams = self.read_telegrams()
+            for telegram in telegrams:
+                yield telegram
+
+            if not telegrams:
+                time.sleep(0.01)
+
+    def start_reading(self) -> None:
+        """Start background reading thread."""
+        if self._read_thread and self._read_thread.is_alive():
+            return
+
+        self._stop_event.clear()
+        self._read_thread = Thread(target=self._read_loop, daemon=True)
+        self._read_thread.start()
+        self.logger.info("Started background reading")
+
+    def stop_reading(self) -> None:
+        """Stop background reading thread."""
+        self._stop_event.set()
+        if self._read_thread:
+            self._read_thread.join(timeout=2.0)
+        self.logger.info("Stopped background reading")
+
+    def _read_loop(self) -> None:
+        """Background read loop."""
+        while not self._stop_event.is_set():
+            if self.connected:
+                self.read_telegrams()
+            else:
+                # Try to reconnect
+                self.logger.info("Attempting reconnection...")
+                if self.connect():
+                    self.logger.info("Reconnected")
+                else:
+                    time.sleep(self.config.reconnect_delay)
+
+            time.sleep(0.01)
 
 
-def create_connection(config: ConnectionConfig) -> EbusConnection:
-    """Factory function to create appropriate connection type."""
-    if config.type == ConnectionType.SERIAL:
-        return SerialConnection(config)
-    elif config.type == ConnectionType.EBUSD:
-        return EbusdConnection(config)
-    else:
-        raise ValueError(f"Unknown connection type: {config.type}")
+class EbusConnection(SerialConnection):
+    """Alias for SerialConnection."""
+    pass
+
+
+def create_connection(config: ConnectionConfig) -> SerialConnection:
+    """
+    Factory function to create connection.
+
+    Args:
+        config: Connection configuration
+
+    Returns:
+        Connection instance
+    """
+    return SerialConnection(config)
