@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ebus-thelia"
+version = "0.1.0"
+description = "eBus reader for Saunier Duval Thelia Condens boilers"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+
+dependencies = [
+    "pyserial>=3.5",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+]
+
+[project.scripts]
+ebus-capture = "tools.capture:main"
+ebus-reader = "main:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["ebus_core*", "thelia*", "tools*"]

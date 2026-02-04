@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""
-Live test of the parser with your actual data.
-"""
+"""Live test of the parser."""
 
 import sys
+import os
 import time
 from datetime import datetime
 
-sys.path.insert(0, '.')
+# Add parent directory to path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from ebus_core.connection import SerialConnection, ConnectionConfig
 from thelia.parser import TheliaParser, DataAggregator
@@ -23,7 +23,6 @@ def main():
     parser = TheliaParser()
     aggregator = DataAggregator()
 
-    # Register aggregator
     parser.register_callback(aggregator.update)
 
     if not connection.connect():
@@ -37,36 +36,28 @@ def main():
         count = 0
         last_summary = time.time()
 
-        while True:
-            for telegram in connection.telegram_generator():
-                msg = parser.parse(telegram)
-                count += 1
+        for telegram in connection.telegram_generator():
+            msg = parser.parse(telegram)
+            count += 1
 
-                # Print parsed message
-                ts = msg.timestamp.strftime("%H:%M:%S")
+            ts = msg.timestamp.strftime("%H:%M:%S")
 
-                if msg.name == "unknown":
-                    print(f"[{count:3d}] {ts} ❓ CMD:{msg.command[0]:02X}{msg.command[1]:02X}")
-                else:
-                    print(f"[{count:3d}] {ts} ✅ {msg}")
+            if msg.name == "unknown":
+                print(f"[{count:3d}] {ts} ❓ CMD:{msg.command[0]:02X}{msg.command[1]:02X}")
+            else:
+                print(f"[{count:3d}] {ts} ✅ {msg}")
 
-                # Print sensor summary every 30 seconds
-                if time.time() - last_summary > 30:
-                    print("\n" + "-" * 50)
-                    print("📊 Current Sensors:")
-                    for key, data in aggregator.get_all_sensors().items():
-                        if "value" in data:
-                            print(f"   {key}: {data['value']} {data.get('unit', '')}")
-                    print("-" * 50 + "\n")
-                    last_summary = time.time()
-
-                if count >= 50:
-                    break
+            if time.time() - last_summary > 30:
+                print("\n" + "-" * 50)
+                print("📊 Current Sensors:")
+                for key, data in aggregator.get_all_sensors().items():
+                    if "value" in data:
+                        print(f"   {key}: {data['value']} {data.get('unit', '')}")
+                print("-" * 50 + "\n")
+                last_summary = time.time()
 
             if count >= 50:
                 break
-
-            time.sleep(0.01)
 
     except KeyboardInterrupt:
         print("\nInterrupted")

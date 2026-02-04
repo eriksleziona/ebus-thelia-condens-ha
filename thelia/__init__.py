@@ -7,7 +7,7 @@ from .messages import (
     THELIA_MESSAGES,
     get_message_definition,
 )
-from .parser import TheliaParser, ParsedMessage, MessageAggregator
+from .parser import TheliaParser, ParsedMessage, DataAggregator
 
 __all__ = [
     "DataType",
@@ -17,5 +17,5 @@ __all__ = [
     "get_message_definition",
     "TheliaParser",
     "ParsedMessage",
-    "MessageAggregator",
+    "DataAggregator",
 ]

@@ -2,13 +2,7 @@
 
 from .crc import EbusCRC
 from .telegram import EbusTelegram, TelegramParser, TelegramType
-from .connection import (
-    ConnectionConfig,
-    ConnectionType,
-    EbusConnection,
-    SerialConnection,
-    create_connection
-)
+from .connection import ConnectionConfig, SerialConnection, create_connection
 
 __all__ = [
     "EbusCRC",
@@ -16,8 +10,6 @@ __all__ = [
     "TelegramParser",
     "TelegramType",
     "ConnectionConfig",
-    "ConnectionType",
-    "EbusConnection",
     "SerialConnection",
     "create_connection",
 ]
