@@ -1,6 +1,6 @@
 """
 Thelia Condens / Saunier Duval message definitions.
-Based on actual captured traffic.
+Based on actual captured traffic analysis.
 """
 
 from dataclasses import dataclass, field
@@ -13,10 +13,9 @@ class DataType(Enum):
     INT8 = "int8"
     UINT16_LE = "uint16_le"
     INT16_LE = "int16_le"
-    DATA1C = "data1c"  # Unsigned byte / 2
-    DATA2B = "data2b"  # Signed word / 256
-    TEMP16 = "temp16"  # Temperature: int16 LE / 256
-    BCD = "bcd"  # BCD encoded byte
+    DATA1C = "data1c"        # Unsigned byte / 2
+    TEMP16 = "temp16"        # Temperature: int16 LE / 256
+    BCD = "bcd"              # BCD encoded byte (0x26 → 26)
     BIT = "bit"
     BYTES = "bytes"
 
@@ -47,34 +46,32 @@ class FieldDefinition:
             elif self.data_type == DataType.UINT16_LE:
                 if self.offset + 2 > len(data):
                     return None
-                value = int.from_bytes(data[self.offset:self.offset + 2], 'little')
+                value = int.from_bytes(data[self.offset:self.offset+2], 'little')
 
             elif self.data_type == DataType.INT16_LE:
                 if self.offset + 2 > len(data):
                     return None
-                value = int.from_bytes(data[self.offset:self.offset + 2], 'little', signed=True)
+                value = int.from_bytes(data[self.offset:self.offset+2], 'little', signed=True)
 
             elif self.data_type == DataType.TEMP16:
-                # Temperature as signed 16-bit little-endian / 256
                 if self.offset + 2 > len(data):
                     return None
-                raw = int.from_bytes(data[self.offset:self.offset + 2], 'little', signed=True)
+                raw = int.from_bytes(data[self.offset:self.offset+2], 'little', signed=True)
                 value = round(raw / 256.0, 1)
 
             elif self.data_type == DataType.DATA1C:
-                # Unsigned byte / 2 → temperature or similar
                 value = round(data[self.offset] / 2.0, 1)
-
-            elif self.data_type == DataType.DATA2B:
-                if self.offset + 2 > len(data):
-                    return None
-                raw = int.from_bytes(data[self.offset:self.offset + 2], 'little', signed=True)
-                value = round(raw / 256.0, 1)
 
             elif self.data_type == DataType.BCD:
                 # BCD: 0x26 → 26, 0x59 → 59
                 raw = data[self.offset]
-                value = (raw >> 4) * 10 + (raw & 0x0F)
+                high = (raw >> 4) & 0x0F
+                low = raw & 0x0F
+                # Validate BCD (each nibble should be 0-9)
+                if high > 9 or low > 9:
+                    value = raw  # Return raw if not valid BCD
+                else:
+                    value = high * 10 + low
 
             elif self.data_type == DataType.BIT:
                 value = bool((data[self.offset] >> self.bit_position) & 1)
@@ -86,7 +83,7 @@ class FieldDefinition:
             else:
                 value = data[self.offset]
 
-            # Apply factor and offset (only for numeric non-bool)
+            # Apply factor and offset
             if isinstance(value, (int, float)) and not isinstance(value, bool):
                 if self.factor != 1.0 or self.offset_value != 0.0:
                     value = round(value * self.factor + self.offset_value, 1)
@@ -131,19 +128,21 @@ def get_message_definition(primary: int, secondary: int) -> Optional[MessageDefi
 # Saunier Duval Thelia Condens Messages
 # ============================================
 
-# B511: Status/Temperature Queries (multiple sub-types based on query byte)
+# B511: Multi-purpose status/temperature query
+# Different query_type values return different data:
+#   query_type=0: Extended status (outdoor temp, DHW, etc.)
+#   query_type=1: Flow temperature (actual)
+#   query_type=2: Setpoints (outdoor cutoff, etc.)
 register_message(MessageDefinition(
     name="status_temps",
     primary_command=0xB5,
     secondary_command=0x11,
     description="Status and temperature data",
     fields=[
-        FieldDefinition("query_type", 0, DataType.UINT8, description="0=extended, 1=flow, 2=outdoor"),
+        FieldDefinition("query_type", 0, DataType.UINT8),
     ],
     response_fields=[
-        # For query_type=1: Flow temp data
-        # Response example: 5D 4C 20 FF FF 53 01 00 FF
-        FieldDefinition("temp1", 0, DataType.TEMP16, unit="°C", description="Primary temperature"),
+        FieldDefinition("temp1", 0, DataType.TEMP16, unit="°C"),
         FieldDefinition("byte2", 2, DataType.UINT8),
         FieldDefinition("temp2_raw", 3, DataType.UINT16_LE),
         FieldDefinition("status_byte", 5, DataType.UINT8),
@@ -151,17 +150,16 @@ register_message(MessageDefinition(
     ]
 ))
 
-# B510: Temperature setpoint/exchange
+# B510: Temperature setpoint exchange
 register_message(MessageDefinition(
     name="temp_setpoint",
     primary_command=0xB5,
     secondary_command=0x10,
-    description="Temperature setpoint exchange",
+    description="Temperature setpoint",
     fields=[
-        # Master sends: 00 00 64 FF FF FF 00 00 00 (0x64 = 100 → 50°C setpoint)
         FieldDefinition("mode1", 0, DataType.UINT8),
         FieldDefinition("mode2", 1, DataType.UINT8),
-        FieldDefinition("flow_setpoint", 2, DataType.DATA1C, unit="°C", description="Flow temperature setpoint"),
+        FieldDefinition("flow_setpoint", 2, DataType.DATA1C, unit="°C"),
         FieldDefinition("byte3", 3, DataType.UINT8),
         FieldDefinition("byte4", 4, DataType.UINT8),
         FieldDefinition("byte5", 5, DataType.UINT8),
@@ -172,7 +170,7 @@ register_message(MessageDefinition(
     ]
 ))
 
-# B504: Modulation/Power query
+# B504: Modulation
 register_message(MessageDefinition(
     name="modulation",
     primary_command=0xB5,
@@ -182,8 +180,7 @@ register_message(MessageDefinition(
         FieldDefinition("query", 0, DataType.UINT8),
     ],
     response_fields=[
-        # Response: 00 FF FF FF FF FF FF FF 20 FF
-        FieldDefinition("modulation", 0, DataType.UINT8, unit="%", description="Burner modulation 0-100"),
+        FieldDefinition("modulation", 0, DataType.UINT8, unit="%"),
         FieldDefinition("power_byte", 8, DataType.UINT8),
     ]
 ))
@@ -193,39 +190,37 @@ register_message(MessageDefinition(
     name="room_temp",
     primary_command=0xB5,
     secondary_command=0x09,
-    description="Room temperature from thermostat",
+    description="Room temperature",
     fields=[
-        # Master: 28 02 → 0x28 = 40 → 40/2 = 20.0°C room temp
-        FieldDefinition("room_temp", 0, DataType.DATA1C, unit="°C", description="Room temperature"),
-        FieldDefinition("room_setpoint_offset", 1, DataType.UINT8, description="Setpoint adjustment"),
+        FieldDefinition("room_temp", 0, DataType.DATA1C, unit="°C"),
+        FieldDefinition("byte1", 1, DataType.UINT8),
     ],
 ))
 
-# B516: Date/Time broadcast (long format, 8 bytes)
+# B516: Date/Time broadcast - using BCD for time fields
 register_message(MessageDefinition(
     name="datetime",
     primary_command=0xB5,
     secondary_command=0x16,
-    description="Date and time broadcast",
+    description="Date/time broadcast",
     fields=[
-        # Data: 00 28 37 15 04 02 03 26 (example)
         FieldDefinition("flags", 0, DataType.UINT8),
-        FieldDefinition("seconds", 1, DataType.UINT8),  # Could be BCD but seems decimal
-        FieldDefinition("minutes", 2, DataType.UINT8),
-        FieldDefinition("hours", 3, DataType.UINT8),
-        FieldDefinition("day", 4, DataType.UINT8),
-        FieldDefinition("month", 5, DataType.UINT8),
-        FieldDefinition("weekday", 6, DataType.UINT8),
-        FieldDefinition("year", 7, DataType.UINT8),  # Years since 2000
+        FieldDefinition("seconds", 1, DataType.BCD),
+        FieldDefinition("minutes", 2, DataType.BCD),
+        FieldDefinition("hours", 3, DataType.BCD),
+        FieldDefinition("day", 4, DataType.BCD),
+        FieldDefinition("month", 5, DataType.BCD),
+        FieldDefinition("weekday", 6, DataType.UINT8),  # Not BCD
+        FieldDefinition("year", 7, DataType.BCD),
     ]
 ))
 
-# B512: Unknown command (seen in traffic)
+# B512: Pressure or other parameter
 register_message(MessageDefinition(
     name="command_b512",
     primary_command=0xB5,
     secondary_command=0x12,
-    description="Unknown B512 command",
+    description="B512 command (possibly pressure)",
     fields=[
         FieldDefinition("data", 0, DataType.BYTES, length=10),
     ],
@@ -234,12 +229,12 @@ register_message(MessageDefinition(
     ]
 ))
 
-# B513: Unknown command
+# B513: Unknown
 register_message(MessageDefinition(
     name="command_b513",
     primary_command=0xB5,
     secondary_command=0x13,
-    description="Unknown B513 command",
+    description="B513 command",
     fields=[
         FieldDefinition("data", 0, DataType.BYTES, length=10),
     ],
@@ -248,7 +243,7 @@ register_message(MessageDefinition(
     ]
 ))
 
-# 0704: Device identification
+# 0704: Device identification - occurs often during bus scan
 register_message(MessageDefinition(
     name="device_id",
     primary_command=0x07,

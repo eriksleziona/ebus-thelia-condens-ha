@@ -1,4 +1,4 @@
-"""Thelia Condens message parser with improved sensor extraction."""
+"""Thelia Condens message parser with corrected sensor interpretation."""
 
 import logging
 from typing import Dict, Any, Optional, List, Callable
@@ -94,7 +94,6 @@ class TheliaParser:
         response_values = {}
         units = {}
 
-        # Decode master/query data
         for field_def in msg_def.fields:
             value = field_def.decode(telegram.data)
             if value is not None:
@@ -102,7 +101,6 @@ class TheliaParser:
                 if field_def.unit:
                     units[field_def.name] = field_def.unit
 
-        # Decode slave/response data
         if telegram.response_data and msg_def.response_fields:
             for field_def in msg_def.response_fields:
                 value = field_def.decode(telegram.response_data)
@@ -133,89 +131,118 @@ class TheliaParser:
 
 
 class DataAggregator:
-    """Aggregates parsed messages into sensor values."""
+    """Aggregates parsed messages into meaningful sensor values."""
 
     def __init__(self, max_age: float = 300.0):
         self.max_age = max_age
         self._sensors: Dict[str, Dict] = {}
-        self._raw_messages: Dict[str, ParsedMessage] = {}
         self.logger = logging.getLogger(self.__class__.__name__)
+
+        # Message counters for filtering spam
+        self._msg_counts: Dict[str, int] = {}
 
     def update(self, message: ParsedMessage) -> None:
         """Update sensors from parsed message."""
         if message.name == "unknown":
             return
 
-        # Store raw message
-        self._raw_messages[message.name] = message
+        # Count messages
+        self._msg_counts[message.name] = self._msg_counts.get(message.name, 0) + 1
 
-        # Extract sensor values based on message type
+        # Extract sensor values
         self._extract_sensors(message)
 
     def _extract_sensors(self, msg: ParsedMessage) -> None:
-        """Extract sensor values from message."""
+        """Extract sensor values based on message type and query_type."""
         ts = msg.timestamp
 
-        # status_temps (B511) - multiple query types
+        # status_temps (B511) - different meaning based on query_type
         if msg.name == "status_temps":
             query_type = msg.query_data.get("query_type", -1)
 
             if query_type == 1:
-                # Flow temperature (actual)
+                # Query type 1: FLOW TEMPERATURE (actual water temp leaving boiler)
                 if "temp1" in msg.response_data:
-                    self._set_sensor("flow_temperature", msg.response_data["temp1"], "°C", ts)
+                    self._set_sensor("flow_temperature", msg.response_data["temp1"], "°C", ts,
+                                    "Actual flow water temperature")
+                # Status byte indicates boiler state
                 if "status_byte" in msg.response_data:
-                    self._set_sensor("status_byte", msg.response_data["status_byte"], "", ts)
+                    status = msg.response_data["status_byte"]
+                    self._set_sensor("boiler_status_code", status, "", ts)
+                    # Interpret status (these are guesses - need verification)
+                    self._set_sensor("burner_active", (status & 0x01) != 0, "", ts)
+                    self._set_sensor("pump_active", (status & 0x10) != 0, "", ts)
 
             elif query_type == 2:
-                # Outdoor/secondary temperature
+                # Query type 2: SETPOINTS (outdoor cutoff threshold, NOT actual outdoor temp!)
                 if "temp1" in msg.response_data:
-                    self._set_sensor("outdoor_temperature", msg.response_data["temp1"], "°C", ts)
+                    self._set_sensor("outdoor_cutoff_setpoint", msg.response_data["temp1"], "°C", ts,
+                                    "Heating disabled when outdoor temp exceeds this")
 
             elif query_type == 0:
-                # Extended status - might contain DHW temp
+                # Query type 0: EXTENDED STATUS (may contain actual outdoor temp!)
                 if "temp1" in msg.response_data:
-                    val = msg.response_data["temp1"]
-                    # Only store if reasonable (not the weird 2.1°C we saw)
-                    if val > 10:
-                        self._set_sensor("dhw_temperature", val, "°C", ts)
+                    temp = msg.response_data["temp1"]
+                    # Only if value is reasonable for outdoor temp (-40 to +50)
+                    if -40 <= temp <= 50:
+                        self._set_sensor("outdoor_temperature", temp, "°C", ts,
+                                        "Actual outdoor temperature")
+                # Try to extract DHW temperature from other bytes
+                if "status_byte" in msg.response_data:
+                    self._set_sensor("status_type0", msg.response_data["status_byte"], "", ts)
 
-        # temp_setpoint (B510) - flow setpoint
+        # temp_setpoint (B510)
         elif msg.name == "temp_setpoint":
-            if "flow_setpoint" in msg.query_data:
-                self._set_sensor("flow_setpoint", msg.query_data["flow_setpoint"], "°C", ts)
+            mode1 = msg.query_data.get("mode1", 0)
+            # Only extract main setpoint (mode1=0), not other variants
+            if mode1 == 0 and "flow_setpoint" in msg.query_data:
+                setpoint = msg.query_data["flow_setpoint"]
+                if setpoint > 0:  # Filter out weird values
+                    self._set_sensor("flow_setpoint", setpoint, "°C", ts,
+                                    "Configured flow temperature setpoint")
 
         # modulation (B504)
         elif msg.name == "modulation":
             if "modulation" in msg.response_data:
-                self._set_sensor("burner_modulation", msg.response_data["modulation"], "%", ts)
+                self._set_sensor("burner_modulation", msg.response_data["modulation"], "%", ts,
+                                "Burner modulation level (0=off)")
 
-        # room_temp (B509)
+        # room_temp (B509) - from thermostat
         elif msg.name == "room_temp":
             if "room_temp" in msg.query_data:
-                self._set_sensor("room_temperature", msg.query_data["room_temp"], "°C", ts)
+                self._set_sensor("room_temperature", msg.query_data["room_temp"], "°C", ts,
+                                "Room temperature from thermostat")
 
         # datetime (B516)
         elif msg.name == "datetime":
-            if all(k in msg.query_data for k in ["hours", "minutes", "seconds"]):
-                h = msg.query_data["hours"]
-                m = msg.query_data["minutes"]
-                s = msg.query_data["seconds"]
-                self._set_sensor("boiler_time", f"{h:02d}:{m:02d}:{s:02d}", "", ts)
+            qd = msg.query_data
+            flags = qd.get("flags", 0)
 
-            if all(k in msg.query_data for k in ["day", "month", "year"]):
-                d = msg.query_data["day"]
-                mo = msg.query_data["month"]
-                y = msg.query_data["year"]
-                year_full = 2000 + y if y < 100 else y
-                self._set_sensor("boiler_date", f"{year_full}-{mo:02d}-{d:02d}", "", ts)
+            # Only process full datetime (flags=0, all fields present)
+            if flags == 0 and len(qd) >= 7:
+                hours = qd.get("hours", 0)
+                minutes = qd.get("minutes", 0)
+                seconds = qd.get("seconds", 0)
 
-    def _set_sensor(self, name: str, value: Any, unit: str, timestamp: datetime) -> None:
+                # Validate (minutes/seconds should be 0-59)
+                if minutes < 60 and seconds < 60 and hours < 24:
+                    self._set_sensor("boiler_time", f"{hours:02d}:{minutes:02d}:{seconds:02d}", "", ts)
+
+                day = qd.get("day", 0)
+                month = qd.get("month", 0)
+                year = qd.get("year", 0)
+
+                if 1 <= day <= 31 and 1 <= month <= 12:
+                    year_full = 2000 + year if year < 100 else year
+                    self._set_sensor("boiler_date", f"{year_full}-{month:02d}-{day:02d}", "", ts)
+
+    def _set_sensor(self, name: str, value: Any, unit: str, timestamp: datetime, description: str = "") -> None:
         """Set a sensor value."""
         self._sensors[name] = {
             "value": value,
             "unit": unit,
             "timestamp": timestamp,
+            "description": description,
         }
 
     def get_sensor(self, name: str) -> Optional[Any]:
@@ -243,30 +270,57 @@ class DataAggregator:
                     "value": data["value"],
                     "unit": data["unit"],
                     "age_seconds": round(age, 1),
+                    "description": data.get("description", ""),
                 }
 
         return result
 
     def print_status(self) -> None:
-        """Print current sensor status."""
+        """Print current sensor status with descriptions."""
         sensors = self.get_all_sensors()
 
-        print("\n" + "=" * 50)
+        print("\n" + "=" * 60)
         print("📊 CURRENT SENSOR VALUES")
-        print("=" * 50)
+        print("=" * 60)
 
-        # Group by category
-        temps = {k: v for k, v in sensors.items() if "temp" in k.lower()}
-        other = {k: v for k, v in sensors.items() if "temp" not in k.lower()}
+        # Categorize sensors
+        categories = {
+            "🌡️  Temperatures": ["flow_temperature", "room_temperature", "outdoor_temperature",
+                                 "flow_setpoint", "outdoor_cutoff_setpoint"],
+            "🔥 Burner": ["burner_modulation", "burner_active", "pump_active", "boiler_status_code"],
+            "🕐 Date/Time": ["boiler_time", "boiler_date"],
+            "📈 Other": []
+        }
 
-        if temps:
-            print("\n🌡️  Temperatures:")
-            for name, data in sorted(temps.items()):
-                print(f"   {name}: {data['value']}{data['unit']}")
+        categorized = set()
+        for cat_sensors in categories.values():
+            categorized.update(cat_sensors)
 
-        if other:
-            print("\n📈 Other:")
-            for name, data in sorted(other.items()):
-                print(f"   {name}: {data['value']}{data['unit']}")
+        # Add uncategorized to "Other"
+        for name in sensors.keys():
+            if name not in categorized:
+                categories["📈 Other"].append(name)
 
-        print("=" * 50)
+        for category, sensor_names in categories.items():
+            cat_sensors = {k: sensors[k] for k in sensor_names if k in sensors}
+            if cat_sensors:
+                print(f"\n{category}:")
+                for name, data in cat_sensors.items():
+                    val = data["value"]
+                    unit = data["unit"]
+                    desc = data.get("description", "")
+
+                    if isinstance(val, bool):
+                        val_str = "✅ ON" if val else "❌ OFF"
+                    elif isinstance(val, float):
+                        val_str = f"{val:.1f}{unit}"
+                    else:
+                        val_str = f"{val}{unit}"
+
+                    if desc:
+                        print(f"   {name}: {val_str}")
+                        print(f"      └─ {desc}")
+                    else:
+                        print(f"   {name}: {val_str}")
+
+        print("\n" + "=" * 60)
