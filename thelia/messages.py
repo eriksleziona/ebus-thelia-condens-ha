@@ -368,6 +368,64 @@ register_message(MessageDefinition(
     ]
 ))
 
+# Add these at the end of the file, before or after the existing definitions:
+
+# ============================================
+# Vaillant/Saunier Duval B5xx Commands
+# These are manufacturer-specific versions
+# ============================================
+
+register_message(MessageDefinition(
+    name="vaillant_status",
+    primary_command=0xB5,
+    secondary_command=0x11,
+    description="Vaillant status message",
+    fields=[
+        FieldDefinition("status_byte", 0, DataType.UINT8, description="Status flags"),
+    ]
+))
+
+register_message(MessageDefinition(
+    name="vaillant_temps",
+    primary_command=0xB5,
+    secondary_command=0x10,
+    description="Vaillant temperature data",
+    fields=[
+        FieldDefinition("temp1", 0, DataType.DATA2B, unit="°C"),
+        FieldDefinition("temp2", 2, DataType.DATA2B, unit="°C"),
+    ]
+))
+
+register_message(MessageDefinition(
+    name="vaillant_room",
+    primary_command=0xB5,
+    secondary_command=0x09,
+    description="Vaillant room temperature",
+    fields=[
+        FieldDefinition("room_temp", 0, DataType.DATA2B, unit="°C"),
+        FieldDefinition("setpoint", 2, DataType.DATA1C, unit="°C"),
+    ]
+))
+
+register_message(MessageDefinition(
+    name="vaillant_modulation",
+    primary_command=0xB5,
+    secondary_command=0x04,
+    description="Vaillant modulation",
+    fields=[
+        FieldDefinition("modulation", 0, DataType.UINT8, unit="%"),
+    ]
+))
+
+register_message(MessageDefinition(
+    name="vaillant_pressure",
+    primary_command=0xB5,
+    secondary_command=0x16,
+    description="Vaillant pressure",
+    fields=[
+        FieldDefinition("pressure", 0, DataType.DATA1C, unit="bar"),
+    ]
+))
 
 def list_all_messages() -> List[str]:
     """Get list of all registered message names."""
