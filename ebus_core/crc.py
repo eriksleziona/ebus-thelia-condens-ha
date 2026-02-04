@@ -1,62 +1,79 @@
 """
 eBus CRC calculation module.
-The eBus protocol uses CRC-8 with polynomial 0x9B.
 """
 
 from typing import Union
 
 
 class EbusCRC:
-    """CRC-8 calculator for eBus protocol."""
+    """
+    CRC-8 calculator for eBus protocol.
 
-    CRC_POLYNOMIAL = 0x9B
+    Polynomial: 0x9B (x^8 + x^7 + x^4 + x^3 + x + 1)
+    """
+
+    POLYNOMIAL = 0x9B
     _table: list = None
 
     @classmethod
-    def _generate_table(cls) -> list:
-        """Generate CRC lookup table (cached)."""
+    def _init_table(cls) -> list:
+        """Generate CRC lookup table."""
         if cls._table is not None:
             return cls._table
 
         table = []
-        for i in range(256):
-            crc = i
+        for byte in range(256):
+            crc = byte
             for _ in range(8):
                 if crc & 0x80:
-                    crc = ((crc << 1) ^ cls.CRC_POLYNOMIAL) & 0xFF
+                    crc = ((crc << 1) ^ cls.POLYNOMIAL) & 0xFF
                 else:
                     crc = (crc << 1) & 0xFF
             table.append(crc)
+
         cls._table = table
         return table
 
     @classmethod
     def calculate(cls, data: Union[bytes, bytearray]) -> int:
-        """
-        Calculate CRC-8 for given data.
-
-        Args:
-            data: Bytes to calculate CRC for
-
-        Returns:
-            CRC-8 value (0-255)
-        """
-        table = cls._generate_table()
+        """Calculate CRC-8 for given data."""
+        table = cls._init_table()
         crc = 0
         for byte in data:
             crc = table[crc ^ byte]
         return crc
 
     @classmethod
-    def verify(cls, data: Union[bytes, bytearray], expected_crc: int) -> bool:
+    def calculate_alt(cls, data: Union[bytes, bytearray]) -> int:
         """
-        Verify CRC matches expected value.
-
-        Args:
-            data: Bytes to verify
-            expected_crc: Expected CRC value
-
-        Returns:
-            True if CRC matches
+        Alternative CRC calculation (bit-by-bit).
+        Used to verify against table method.
         """
-        return cls.calculate(data) == expected_crc
+        crc = 0
+        for byte in data:
+            crc ^= byte
+            for _ in range(8):
+                if crc & 0x80:
+                    crc = ((crc << 1) ^ cls.POLYNOMIAL) & 0xFF
+                else:
+                    crc = (crc << 1) & 0xFF
+        return crc
+
+    @classmethod
+    def verify(cls, data: Union[bytes, bytearray], expected: int) -> bool:
+        """Verify CRC matches."""
+        return cls.calculate(data) == expected
+
+
+# Quick test
+if __name__ == "__main__":
+    # Test both methods produce same result
+    test_data = bytes([0x10, 0x08, 0xB5, 0x11, 0x01, 0x01])
+
+    crc1 = EbusCRC.calculate(test_data)
+    crc2 = EbusCRC.calculate_alt(test_data)
+
+    print(f"Test data: {test_data.hex()}")
+    print(f"CRC (table): 0x{crc1:02X}")
+    print(f"CRC (bit):   0x{crc2:02X}")
+    print(f"Match: {crc1 == crc2}")
