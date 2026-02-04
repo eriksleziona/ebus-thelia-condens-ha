@@ -1,6 +1,6 @@
 """
 Thelia Condens message definitions.
-Based on Saunier Duval / Vaillant eBus protocol.
+Saunier Duval / Vaillant eBus protocol using B5xx commands.
 """
 
 from dataclasses import dataclass, field
@@ -35,26 +35,15 @@ class FieldDefinition:
     length: int = 1
     unit: str = ""
     description: str = ""
-    bit_position: int = 0      # For BIT type
-    bit_count: int = 1         # For BITS type
+    bit_position: int = 0
+    bit_count: int = 1
     factor: float = 1.0
     offset_value: float = 0.0
-    values: Dict[int, str] = field(default_factory=dict)  # Enum mapping
+    values: Dict[int, str] = field(default_factory=dict)
 
     def decode(self, data: bytes) -> Any:
-        """
-        Decode field value from bytes.
-
-        Args:
-            data: Raw data bytes
-
-        Returns:
-            Decoded value
-        """
+        """Decode field value from bytes."""
         if self.offset >= len(data):
-            return None
-
-        if self.offset + self.length > len(data) and self.data_type not in (DataType.BIT, DataType.BITS):
             return None
 
         try:
@@ -62,80 +51,52 @@ class FieldDefinition:
 
             if self.data_type == DataType.UINT8:
                 raw_value = data[self.offset]
-
             elif self.data_type == DataType.INT8:
-                raw_value = int.from_bytes(
-                    [data[self.offset]], 'little', signed=True
-                )
-
+                raw_value = int.from_bytes([data[self.offset]], 'little', signed=True)
             elif self.data_type == DataType.UINT16:
-                raw_value = int.from_bytes(
-                    data[self.offset:self.offset + 2], 'little'
-                )
-
+                if self.offset + 2 > len(data):
+                    return None
+                raw_value = int.from_bytes(data[self.offset:self.offset+2], 'little')
             elif self.data_type == DataType.INT16:
-                raw_value = int.from_bytes(
-                    data[self.offset:self.offset + 2], 'little', signed=True
-                )
-
-            elif self.data_type == DataType.UINT32:
-                raw_value = int.from_bytes(
-                    data[self.offset:self.offset + 4], 'little'
-                )
-
+                if self.offset + 2 > len(data):
+                    return None
+                raw_value = int.from_bytes(data[self.offset:self.offset+2], 'little', signed=True)
             elif self.data_type == DataType.DATA1B:
-                # Signed byte divided by 2
-                raw = int.from_bytes([data[self.offset]], 'little', signed=True)
-                raw_value = raw / 2.0
-
+                raw_value = int.from_bytes([data[self.offset]], 'little', signed=True) / 2.0
             elif self.data_type == DataType.DATA1C:
-                # Unsigned byte divided by 2
                 raw_value = data[self.offset] / 2.0
-
             elif self.data_type == DataType.DATA2B:
-                # Signed word divided by 256
-                raw = int.from_bytes(
-                    data[self.offset:self.offset + 2], 'little', signed=True
-                )
-                raw_value = raw / 256.0
-
+                if self.offset + 2 > len(data):
+                    return None
+                raw_value = int.from_bytes(data[self.offset:self.offset+2], 'little', signed=True) / 256.0
             elif self.data_type == DataType.DATA2C:
-                # Unsigned word divided by 256
-                raw = int.from_bytes(
-                    data[self.offset:self.offset + 2], 'little'
-                )
-                raw_value = raw / 256.0
-
+                if self.offset + 2 > len(data):
+                    return None
+                raw_value = int.from_bytes(data[self.offset:self.offset+2], 'little') / 256.0
             elif self.data_type == DataType.BIT:
                 raw_value = bool((data[self.offset] >> self.bit_position) & 1)
-
             elif self.data_type == DataType.BITS:
                 mask = (1 << self.bit_count) - 1
                 raw_value = (data[self.offset] >> self.bit_position) & mask
-
             elif self.data_type == DataType.BCD:
                 raw = data[self.offset]
                 raw_value = (raw >> 4) * 10 + (raw & 0x0F)
-
             elif self.data_type == DataType.BYTES:
-                raw_value = data[self.offset:self.offset + self.length].hex()
-
+                end = min(self.offset + self.length, len(data))
+                raw_value = data[self.offset:end].hex()
             elif self.data_type == DataType.STRING:
-                raw_value = data[self.offset:self.offset + self.length].decode(
-                    'ascii', errors='ignore'
-                ).strip('\x00')
-
+                end = min(self.offset + self.length, len(data))
+                raw_value = data[self.offset:end].decode('ascii', errors='ignore').strip('\x00')
             else:
                 raw_value = data[self.offset]
 
-            # Apply factor and offset for numeric types
+            # Apply factor and offset
             if isinstance(raw_value, (int, float)) and not isinstance(raw_value, bool):
                 raw_value = raw_value * self.factor + self.offset_value
 
-            # Map to enum value if defined
-            if self.values and isinstance(raw_value, int):
-                if raw_value in self.values:
-                    return self.values[raw_value]
+            # Map enum values
+            if self.values and isinstance(raw_value, int) and raw_value in self.values:
+                return self.values[raw_value]
 
             return raw_value
 
@@ -151,23 +112,20 @@ class MessageDefinition:
     secondary_command: int
     description: str = ""
     source_address: Optional[int] = None
+    is_master_slave: bool = False  # True if expects slave response
     fields: List[FieldDefinition] = field(default_factory=list)
+    response_fields: List[FieldDefinition] = field(default_factory=list)  # For slave response
 
     @property
     def command(self) -> tuple:
-        """Return command as tuple."""
         return (self.primary_command, self.secondary_command)
 
     @property
     def command_hex(self) -> str:
-        """Return command as hex string."""
         return f"{self.primary_command:02X}{self.secondary_command:02X}"
 
 
-# ============================================
 # Message Registry
-# ============================================
-
 THELIA_MESSAGES: Dict[tuple, MessageDefinition] = {}
 
 
@@ -183,249 +141,120 @@ def get_message_definition(primary: int, secondary: int) -> Optional[MessageDefi
 
 
 # ============================================
-# Thelia Condens Message Definitions
+# Saunier Duval Thelia Condens - B5xx Commands
+# Based on captured traffic analysis
 # ============================================
 
-# ----- Broadcast Messages (destination 0xFE) -----
-
+# ----- B510: Temperature Request -----
+# Master sends to boiler (0x08), gets temperature response
 register_message(MessageDefinition(
-    name="datetime",
-    primary_command=0x07,
-    secondary_command=0x00,
-    description="Date and time broadcast",
-    fields=[
-        FieldDefinition("second", 0, DataType.BCD, description="Seconds"),
-        FieldDefinition("minute", 1, DataType.BCD, description="Minutes"),
-        FieldDefinition("hour", 2, DataType.BCD, description="Hours"),
-        FieldDefinition("day", 3, DataType.BCD, description="Day"),
-        FieldDefinition("month", 4, DataType.BCD, description="Month"),
-        FieldDefinition("year", 5, DataType.BCD, description="Year (0-99)"),
-        FieldDefinition("weekday", 6, DataType.UINT8, description="Day of week"),
-    ]
-))
-
-register_message(MessageDefinition(
-    name="outside_temp",
-    primary_command=0x05,
-    secondary_command=0x03,
-    description="Outside temperature",
-    fields=[
-        FieldDefinition(
-            "outside_temp", 0, DataType.DATA2B,
-            unit="°C", description="Outside temperature"
-        ),
-    ]
-))
-
-register_message(MessageDefinition(
-    name="flow_return_temp",
-    primary_command=0x05,
-    secondary_command=0x07,
-    description="Flow and return temperatures",
-    fields=[
-        FieldDefinition(
-            "flow_temp", 0, DataType.DATA2B,
-            unit="°C", description="Flow temperature"
-        ),
-        FieldDefinition(
-            "return_temp", 2, DataType.DATA2B,
-            unit="°C", description="Return temperature"
-        ),
-    ]
-))
-
-register_message(MessageDefinition(
-    name="dhw_temps",
-    primary_command=0x05,
-    secondary_command=0x08,
-    description="DHW temperatures",
-    fields=[
-        FieldDefinition(
-            "dhw_temp", 0, DataType.DATA2B,
-            unit="°C", description="DHW actual temperature"
-        ),
-        FieldDefinition(
-            "dhw_setpoint", 2, DataType.DATA1C,
-            unit="°C", description="DHW setpoint"
-        ),
-    ]
-))
-
-register_message(MessageDefinition(
-    name="room_temp",
-    primary_command=0x05,
-    secondary_command=0x09,
-    description="Room temperature from thermostat",
-    fields=[
-        FieldDefinition(
-            "room_temp", 0, DataType.DATA2B,
-            unit="°C", description="Room temperature"
-        ),
-        FieldDefinition(
-            "room_setpoint", 2, DataType.DATA1C,
-            unit="°C", description="Room setpoint"
-        ),
-    ]
-))
-
-# ----- Status Messages -----
-
-register_message(MessageDefinition(
-    name="status_flags",
-    primary_command=0x05,
-    secondary_command=0x01,
-    description="Boiler status flags",
-    fields=[
-        FieldDefinition(
-            "burner", 0, DataType.BIT, bit_position=0,
-            description="Burner on/off"
-        ),
-        FieldDefinition(
-            "pump", 0, DataType.BIT, bit_position=1,
-            description="Pump running"
-        ),
-        FieldDefinition(
-            "dhw_mode", 0, DataType.BIT, bit_position=2,
-            description="DHW mode active"
-        ),
-        FieldDefinition(
-            "heating_mode", 0, DataType.BIT, bit_position=3,
-            description="Heating mode active"
-        ),
-        FieldDefinition(
-            "flame", 0, DataType.BIT, bit_position=4,
-            description="Flame detected"
-        ),
-    ]
-))
-
-register_message(MessageDefinition(
-    name="modulation",
-    primary_command=0x05,
-    secondary_command=0x04,
-    description="Burner modulation",
-    fields=[
-        FieldDefinition(
-            "modulation", 0, DataType.UINT8,
-            unit="%", description="Modulation level"
-        ),
-        FieldDefinition(
-            "power", 1, DataType.DATA1C,
-            unit="kW", description="Current power"
-        ),
-    ]
-))
-
-register_message(MessageDefinition(
-    name="pressure",
-    primary_command=0x05,
-    secondary_command=0x12,
-    description="System water pressure",
-    fields=[
-        FieldDefinition(
-            "pressure", 0, DataType.DATA1C,
-            unit="bar", description="Water pressure"
-        ),
-    ]
-))
-
-register_message(MessageDefinition(
-    name="error",
-    primary_command=0x05,
+    name="temp_request",
+    primary_command=0xB5,
     secondary_command=0x10,
-    description="Error status",
+    description="Temperature data request (thermostat → boiler)",
+    is_master_slave=True,
     fields=[
-        FieldDefinition("error_code", 0, DataType.UINT8, description="Error code"),
-        FieldDefinition(
-            "error_state", 1, DataType.UINT8,
-            values={0: "ok", 1: "warning", 2: "blocking", 3: "locking"},
-            description="Error state"
-        ),
+        # Master data: 9 bytes - 000059ffffff000000
+        FieldDefinition("unknown1", 0, DataType.UINT8),
+        FieldDefinition("unknown2", 1, DataType.UINT8),
+        FieldDefinition("temp_byte", 2, DataType.DATA1C, unit="°C", description="Temperature value?"),
+        # Bytes 3-8 are often 0xFF (not available) or 0x00
+    ],
+    response_fields=[
+        FieldDefinition("response", 0, DataType.BYTES, length=1),
     ]
 ))
 
-# ----- Identification -----
-
+# ----- B511: Status Query -----
+# Multiple sub-queries based on data byte
 register_message(MessageDefinition(
-    name="device_id",
-    primary_command=0x07,
-    secondary_command=0x04,
-    description="Device identification",
-    fields=[
-        FieldDefinition(
-            "manufacturer", 0, DataType.UINT8,
-            values={0x11: "Vaillant", 0x41: "Saunier Duval"},
-            description="Manufacturer ID"
-        ),
-        FieldDefinition(
-            "device_id", 1, DataType.BYTES, length=5,
-            description="Device ID"
-        ),
-        FieldDefinition(
-            "sw_version", 6, DataType.UINT16,
-            description="Software version"
-        ),
-    ]
-))
-
-# Add these at the end of the file, before or after the existing definitions:
-
-# ============================================
-# Vaillant/Saunier Duval B5xx Commands
-# These are manufacturer-specific versions
-# ============================================
-
-register_message(MessageDefinition(
-    name="vaillant_status",
+    name="status_query",
     primary_command=0xB5,
     secondary_command=0x11,
-    description="Vaillant status message",
+    description="Status query (different sub-types based on data)",
+    is_master_slave=True,
     fields=[
-        FieldDefinition("status_byte", 0, DataType.UINT8, description="Status flags"),
+        FieldDefinition("query_type", 0, DataType.UINT8,
+                       values={0: "type_0", 1: "type_1", 2: "type_2"},
+                       description="Query sub-type"),
+    ],
+    response_fields=[
+        # Response varies by query type
+        # Type 01 → 5f4e20ffff530100ff (9 bytes)
+        # Type 02 → 0314965a785a (6 bytes)
+        # Type 00 → fb020e28040f208100 (9 bytes)
+        FieldDefinition("response_data", 0, DataType.BYTES, length=9),
     ]
 ))
 
+# ----- B504: Modulation/Power Query -----
 register_message(MessageDefinition(
-    name="vaillant_temps",
+    name="modulation_query",
     primary_command=0xB5,
-    secondary_command=0x10,
-    description="Vaillant temperature data",
+    secondary_command=0x04,
+    description="Modulation/power query",
+    is_master_slave=True,
     fields=[
-        FieldDefinition("temp1", 0, DataType.DATA2B, unit="°C"),
-        FieldDefinition("temp2", 2, DataType.DATA2B, unit="°C"),
+        FieldDefinition("query", 0, DataType.UINT8),
+    ],
+    response_fields=[
+        # Response: 00ffffffffffffff20ff (10 bytes)
+        FieldDefinition("modulation", 0, DataType.UINT8, unit="%"),
+        FieldDefinition("response_data", 1, DataType.BYTES, length=9),
     ]
 ))
 
+# ----- B509: Room Temperature -----
 register_message(MessageDefinition(
-    name="vaillant_room",
+    name="room_temp",
     primary_command=0xB5,
     secondary_command=0x09,
-    description="Vaillant room temperature",
+    description="Room temperature data",
+    is_master_slave=True,
     fields=[
+        FieldDefinition("query", 0, DataType.UINT8),
+    ],
+    response_fields=[
         FieldDefinition("room_temp", 0, DataType.DATA2B, unit="°C"),
         FieldDefinition("setpoint", 2, DataType.DATA1C, unit="°C"),
     ]
 ))
 
+# ----- B516: Broadcast (Date/Time or Status) -----
 register_message(MessageDefinition(
-    name="vaillant_modulation",
+    name="broadcast_datetime",
     primary_command=0xB5,
-    secondary_command=0x04,
-    description="Vaillant modulation",
+    secondary_command=0x16,
+    description="Broadcast message (possibly date/time)",
+    is_master_slave=False,  # Broadcast - no response
     fields=[
-        FieldDefinition("modulation", 0, DataType.UINT8, unit="%"),
+        # Data: 0017251404020326 (8 bytes)
+        # Possibly: status, hour, minute, day, month, weekday, year?
+        FieldDefinition("byte0", 0, DataType.UINT8),
+        FieldDefinition("byte1", 1, DataType.UINT8),  # Could be hour (0x17 = 23, but BCD would be 17)
+        FieldDefinition("byte2", 2, DataType.UINT8),  # Could be minute
+        FieldDefinition("byte3", 3, DataType.UINT8),  # Could be day
+        FieldDefinition("byte4", 4, DataType.UINT8),  # Could be month
+        FieldDefinition("byte5", 5, DataType.UINT8),
+        FieldDefinition("byte6", 6, DataType.UINT8),
+        FieldDefinition("byte7", 7, DataType.UINT8),  # Could be year (0x26 = 38 or 2026?)
     ]
 ))
 
+# ----- Short B516 variant -----
 register_message(MessageDefinition(
-    name="vaillant_pressure",
+    name="broadcast_status",
     primary_command=0xB5,
     secondary_command=0x16,
-    description="Vaillant pressure",
+    description="Short broadcast status (3 bytes)",
+    is_master_slave=False,
     fields=[
-        FieldDefinition("pressure", 0, DataType.DATA1C, unit="bar"),
+        FieldDefinition("status", 0, DataType.UINT8),
+        FieldDefinition("value", 1, DataType.UINT8),
+        FieldDefinition("flags", 2, DataType.UINT8),
     ]
 ))
+
 
 def list_all_messages() -> List[str]:
     """Get list of all registered message names."""
