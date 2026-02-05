@@ -1,5 +1,6 @@
 """
 Thelia Condens + MiPro Controller message definitions.
+Based on actual protocol analysis and user-provided decoding table.
 """
 
 from dataclasses import dataclass, field
@@ -12,10 +13,11 @@ class DataType(Enum):
     INT8 = "int8"
     UINT16_LE = "uint16_le"
     INT16_LE = "int16_le"
-    DATA1C = "data1c"
-    DATA2B = "data2b"
-    TEMP16 = "temp16"
-    BCD = "bcd"
+    DATA1C = "data1c"  # Unsigned byte / 2 (for temperatures)
+    DATA1B = "data1b"  # Signed byte / 2
+    TEMP16 = "temp16"  # Signed 16-bit LE / 256 (for precise temps)
+    PRESSURE = "pressure"  # Unsigned byte / 10 (for bar)
+    BCD = "bcd"  # BCD encoded
     BIT = "bit"
     BYTES = "bytes"
 
@@ -39,49 +41,69 @@ class FieldDefinition:
         try:
             if self.data_type == DataType.UINT8:
                 value = data[self.offset]
+
             elif self.data_type == DataType.INT8:
                 value = int.from_bytes([data[self.offset]], 'little', signed=True)
+
             elif self.data_type == DataType.UINT16_LE:
                 if self.offset + 2 > len(data):
                     return None
-                value = int.from_bytes(data[self.offset:self.offset+2], 'little')
+                value = int.from_bytes(data[self.offset:self.offset + 2], 'little')
+
             elif self.data_type == DataType.INT16_LE:
                 if self.offset + 2 > len(data):
                     return None
-                value = int.from_bytes(data[self.offset:self.offset+2], 'little', signed=True)
-            elif self.data_type == DataType.TEMP16:
-                if self.offset + 2 > len(data):
-                    return None
-                raw = int.from_bytes(data[self.offset:self.offset+2], 'little', signed=True)
-                value = round(raw / 256.0, 1)
+                value = int.from_bytes(data[self.offset:self.offset + 2], 'little', signed=True)
+
             elif self.data_type == DataType.DATA1C:
+                # Unsigned byte divided by 2 (common for temperatures)
                 value = round(data[self.offset] / 2.0, 1)
-            elif self.data_type == DataType.DATA2B:
+
+            elif self.data_type == DataType.DATA1B:
+                # Signed byte divided by 2
+                raw = int.from_bytes([data[self.offset]], 'little', signed=True)
+                value = round(raw / 2.0, 1)
+
+            elif self.data_type == DataType.TEMP16:
+                # Signed 16-bit LE divided by 256 (for precise temps including negative)
                 if self.offset + 2 > len(data):
                     return None
-                raw = int.from_bytes(data[self.offset:self.offset+2], 'little', signed=True)
+                raw = int.from_bytes(data[self.offset:self.offset + 2], 'little', signed=True)
+                # Check for invalid value (0xFFFF = -1)
+                if raw == -1 or raw == 32767 or raw == -32768:
+                    return None
                 value = round(raw / 256.0, 1)
+
+            elif self.data_type == DataType.PRESSURE:
+                # Unsigned byte divided by 10 (for bar pressure)
+                value = round(data[self.offset] / 10.0, 1)
+
             elif self.data_type == DataType.BCD:
                 raw = data[self.offset]
                 high = (raw >> 4) & 0x0F
                 low = raw & 0x0F
                 if high > 9 or low > 9:
-                    value = raw
+                    value = raw  # Not valid BCD, return raw
                 else:
                     value = high * 10 + low
+
             elif self.data_type == DataType.BIT:
                 value = bool((data[self.offset] >> self.bit_position) & 1)
+
             elif self.data_type == DataType.BYTES:
                 end = min(self.offset + self.length, len(data))
                 value = data[self.offset:end].hex()
+
             else:
                 value = data[self.offset]
 
+            # Apply factor and offset
             if isinstance(value, (int, float)) and not isinstance(value, bool):
                 if self.factor != 1.0 or self.offset_value != 0.0:
                     value = round(value * self.factor + self.offset_value, 1)
 
             return value
+
         except Exception:
             return None
 
@@ -117,36 +139,83 @@ def get_message_definition(primary: int, secondary: int) -> Optional[MessageDefi
 
 
 # ============================================
-# BOILER + MIPRO MESSAGES
+# CORRECTED MESSAGE DEFINITIONS
+# Based on: 10 08 B5 xx patterns
 # ============================================
 
-# B509: Room Temperature (MiPro → Boiler)
-# The MiPro sends the current room temperature and possibly setpoint adjustment
+# B511: Status/Temperature Query - Multiple query types
+# Query byte determines what data is returned
 register_message(MessageDefinition(
-    name="room_temp",
+    name="status_temps",
     primary_command=0xB5,
-    secondary_command=0x09,
-    description="Room temperature from MiPro controller",
+    secondary_command=0x11,
+    description="Status and temperature queries",
     fields=[
-        FieldDefinition("room_temp", 0, DataType.DATA1C, unit="°C",
-                       description="Current room temperature"),
-        FieldDefinition("room_setpoint_adjust", 1, DataType.INT8, unit="",
-                       description="Room setpoint adjustment"),
+        FieldDefinition("query_type", 0, DataType.UINT8,
+                        description="0=extended, 1=temps, 2=modulation"),
     ],
+    response_fields=[
+        # For query_type=1 (10 08 b5 11 01 01):
+        # Response has 9 bytes:
+        # Byte 0: Flow temp (÷2)
+        # Byte 1: Return temp (÷2)
+        # Byte 2: Unknown
+        # Bytes 3-4: Often 0xFFFF
+        # Byte 5: Status byte
+        # Byte 6: Pressure? or flags
+        # Bytes 7-8: Status flags
+        FieldDefinition("flow_temp", 0, DataType.DATA1C, unit="°C",
+                        description="Flow temperature (Vorlauf)"),
+        FieldDefinition("return_temp", 1, DataType.DATA1C, unit="°C",
+                        description="Return temperature (Rücklauf)"),
+        FieldDefinition("byte2", 2, DataType.UINT8),
+        FieldDefinition("bytes3_4", 3, DataType.UINT16_LE),
+        FieldDefinition("status_byte", 5, DataType.UINT8),
+        FieldDefinition("pressure_raw", 6, DataType.UINT8,
+                        description="Might be pressure × 10"),
+        FieldDefinition("flags", 7, DataType.BYTES, length=2),
+    ]
 ))
 
-# B510: Temperature Setpoint Exchange (MiPro ↔ Boiler)
+# B504: Modulation and Outdoor Temperature Query
+register_message(MessageDefinition(
+    name="modulation_outdoor",
+    primary_command=0xB5,
+    secondary_command=0x04,
+    description="Modulation and outdoor temperature",
+    fields=[
+        FieldDefinition("query", 0, DataType.UINT8),
+    ],
+    response_fields=[
+        # Response for 10 08 b5 04 01 00:
+        # Byte 0: Modulation %
+        # Bytes 1-2: Outdoor temp (signed 16-bit / 256)
+        FieldDefinition("modulation", 0, DataType.UINT8, unit="%",
+                        description="Burner modulation 0-100%"),
+        FieldDefinition("outdoor_temp", 1, DataType.TEMP16, unit="°C",
+                        description="Outdoor temperature"),
+        # Rest often 0xFF
+        FieldDefinition("byte3", 3, DataType.UINT8),
+    ]
+))
+
+# B510: Temperature Setpoints (MiPro → Boiler)
 register_message(MessageDefinition(
     name="temp_setpoint",
     primary_command=0xB5,
     secondary_command=0x10,
-    description="Temperature setpoint",
+    description="Temperature setpoints from controller",
     fields=[
-        FieldDefinition("mode1", 0, DataType.UINT8, description="Mode byte 1"),
-        FieldDefinition("mode2", 1, DataType.UINT8, description="Mode byte 2"),
-        FieldDefinition("flow_setpoint", 2, DataType.DATA1C, unit="°C",
-                       description="Requested flow temperature"),
-        FieldDefinition("byte3", 3, DataType.UINT8),
+        # For 10 08 b5 10 09:
+        # Byte 0-1: Mode bytes
+        # Byte 2: Target flow temp (÷2)
+        # Byte 3: DHW setpoint (÷2)
+        FieldDefinition("mode1", 0, DataType.UINT8),
+        FieldDefinition("mode2", 1, DataType.UINT8),
+        FieldDefinition("target_flow_temp", 2, DataType.DATA1C, unit="°C",
+                        description="Target flow temperature"),
+        FieldDefinition("dhw_setpoint", 3, DataType.DATA1C, unit="°C",
+                        description="DHW setpoint temperature"),
         FieldDefinition("byte4", 4, DataType.UINT8),
         FieldDefinition("byte5", 5, DataType.UINT8),
         FieldDefinition("bytes6_8", 6, DataType.BYTES, length=3),
@@ -156,47 +225,26 @@ register_message(MessageDefinition(
     ]
 ))
 
-# B511: Multi-purpose Status Query (MiPro → Boiler)
+# B509: Room Temperature from MiPro
 register_message(MessageDefinition(
-    name="status_temps",
+    name="room_temp",
     primary_command=0xB5,
-    secondary_command=0x11,
-    description="Status and temperature queries",
+    secondary_command=0x09,
+    description="Room temperature from MiPro controller",
     fields=[
-        FieldDefinition("query_type", 0, DataType.UINT8,
-                       description="0=extended, 1=flow temp, 2=setpoints"),
+        FieldDefinition("room_temp", 0, DataType.DATA1C, unit="°C",
+                        description="Room temperature"),
+        FieldDefinition("room_setpoint_adjust", 1, DataType.INT8,
+                        description="Setpoint adjustment"),
     ],
-    response_fields=[
-        FieldDefinition("temp1", 0, DataType.TEMP16, unit="°C"),
-        FieldDefinition("byte2", 2, DataType.UINT8),
-        FieldDefinition("temp2_raw", 3, DataType.UINT16_LE),
-        FieldDefinition("status_byte", 5, DataType.UINT8),
-        FieldDefinition("flags", 6, DataType.BYTES, length=3),
-    ]
 ))
 
-# B504: Modulation Query (MiPro → Boiler)
-register_message(MessageDefinition(
-    name="modulation",
-    primary_command=0xB5,
-    secondary_command=0x04,
-    description="Burner modulation query",
-    fields=[
-        FieldDefinition("query", 0, DataType.UINT8),
-    ],
-    response_fields=[
-        FieldDefinition("modulation", 0, DataType.UINT8, unit="%",
-                       description="Burner modulation 0-100%"),
-        FieldDefinition("power_byte", 8, DataType.UINT8),
-    ]
-))
-
-# B516: Date/Time Broadcast (MiPro → Broadcast)
+# B516: Date/Time Broadcast from MiPro (to 0xFE)
 register_message(MessageDefinition(
     name="datetime",
     primary_command=0xB5,
     secondary_command=0x16,
-    description="Date/time broadcast from MiPro",
+    description="Date/time broadcast",
     fields=[
         FieldDefinition("flags", 0, DataType.UINT8),
         FieldDefinition("seconds", 1, DataType.BCD),
@@ -209,12 +257,12 @@ register_message(MessageDefinition(
     ]
 ))
 
-# B512: Possibly Pressure or DHW
+# B512: Possibly DHW or Pressure related
 register_message(MessageDefinition(
     name="b512_query",
     primary_command=0xB5,
     secondary_command=0x12,
-    description="B512 query (pressure/DHW?)",
+    description="B512 query",
     fields=[
         FieldDefinition("query_type", 0, DataType.UINT8),
         FieldDefinition("data", 1, DataType.BYTES, length=9),
@@ -239,35 +287,7 @@ register_message(MessageDefinition(
     ]
 ))
 
-# B514: Possibly Schedule/Program
-register_message(MessageDefinition(
-    name="b514_query",
-    primary_command=0xB5,
-    secondary_command=0x14,
-    description="B514 query (schedule?)",
-    fields=[
-        FieldDefinition("data", 0, DataType.BYTES, length=10),
-    ],
-    response_fields=[
-        FieldDefinition("response", 0, DataType.BYTES, length=10),
-    ]
-))
-
-# B515: Possibly Errors/History
-register_message(MessageDefinition(
-    name="b515_query",
-    primary_command=0xB5,
-    secondary_command=0x15,
-    description="B515 query (errors/history?)",
-    fields=[
-        FieldDefinition("data", 0, DataType.BYTES, length=10),
-    ],
-    response_fields=[
-        FieldDefinition("response", 0, DataType.BYTES, length=10),
-    ]
-))
-
-# 0704: Device Identification (scan)
+# 0704: Device Identification
 register_message(MessageDefinition(
     name="device_id",
     primary_command=0x07,
@@ -278,17 +298,7 @@ register_message(MessageDefinition(
         FieldDefinition("manufacturer", 0, DataType.UINT8),
         FieldDefinition("device_id", 1, DataType.BYTES, length=5),
         FieldDefinition("sw_version", 6, DataType.UINT16_LE),
-        FieldDefinition("hw_version", 8, DataType.UINT16_LE),
     ]
-))
-
-# 0700: Device Presence
-register_message(MessageDefinition(
-    name="device_presence",
-    primary_command=0x07,
-    secondary_command=0x00,
-    description="Device presence query",
-    fields=[],
 ))
 
 
