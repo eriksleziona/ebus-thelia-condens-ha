@@ -8,6 +8,7 @@ from .messages import (
     get_message_definition,
 )
 from .parser import TheliaParser, ParsedMessage, DataAggregator
+from .alerts import AlertManager, Alert, AlertType, AlertSeverity, AlertThreshold
 
 __all__ = [
     "DataType",
@@ -18,4 +19,9 @@ __all__ = [
     "TheliaParser",
     "ParsedMessage",
     "DataAggregator",
+    "AlertManager",
+    "Alert",
+    "AlertType",
+    "AlertSeverity",
+    "AlertThreshold",
 ]
