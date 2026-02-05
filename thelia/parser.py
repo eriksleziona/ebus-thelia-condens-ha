@@ -1,6 +1,8 @@
 """
-Thelia + MiPro parser with corrected value interpretation.
-Based on user-provided decoding table.
+Thelia + MiPro parser with corrected byte positions.
+Based on debug analysis:
+- Outdoor temp: B504 bytes[8:9] / 256
+- Pressure: B511 type 0 byte[2] / 10
 """
 
 import logging
@@ -10,7 +12,6 @@ from datetime import datetime
 
 from ebus_core.telegram import EbusTelegram
 from .messages import MessageDefinition, get_message_definition
-
 
 EBUS_ADDRESSES = {
     0x00: "broadcast_0",
@@ -44,7 +45,7 @@ class ParsedMessage:
         all_data = {**self.query_data, **self.response_data}
         for k, v in all_data.items():
             if v is None:
-                continue  # Skip None values
+                continue
             unit = self.units.get(k, "")
             if isinstance(v, float):
                 parts.append(f"{k}={v:.1f}{unit}")
@@ -148,19 +149,17 @@ class TheliaParser:
 
 class DataAggregator:
     """
-    Aggregates sensor values using corrected decoding:
+    Aggregates sensor values using verified byte positions:
 
-    Based on user-provided table:
-    - Flow Temp: B511 query_type=1, response byte 0 ÷ 2
-    - Return Temp: B511 query_type=1, response byte 1 ÷ 2
-    - Water Pressure: B511 query_type=1, response byte 6 ÷ 10
-    - Outdoor Temp: B504 response bytes 1&2 ÷ 256 (signed)
-    - DHW Setpoint: B510 byte 3 ÷ 2 (if not 0xFF)
-    - Target Flow: B510 byte 2 ÷ 2
-    - Burner Modulation: B511 query_type=2, response byte 0
-    - Room Temp: B509 byte 0 ÷ 2
-    - Flame Status: B511 query_type=1, response byte 8 bit 0
-    - Pump Status: B511 query_type=1, response byte 8 bit 1
+    Verified positions from debug:
+    - Flow Temp:      B511 type 1, resp byte[0] ÷ 2
+    - Return Temp:    B511 type 1, resp byte[1] ÷ 2
+    - Pressure:       B511 type 0, resp byte[2] ÷ 10
+    - Outdoor Temp:   B504, resp bytes[8:9] as int16_le ÷ 256
+    - Outdoor Cutoff: B511 type 2, resp byte[1] (as-is)
+    - Modulation:     B504, resp byte[0] (as-is %)
+    - Target Flow:    B510, query byte[2] ÷ 2
+    - Room Temp:      B509, query byte[0] ÷ 2
     """
 
     def __init__(self, max_age: float = 300.0):
@@ -171,140 +170,166 @@ class DataAggregator:
     def update(self, message: ParsedMessage) -> None:
         if message.name in ("unknown", "device_id"):
             return
-        self._extract_sensors(message)
 
-    def _extract_sensors(self, msg: ParsedMessage) -> None:
+        # Get raw telegram for direct byte access
+        telegram = message.raw_telegram
+        if telegram is None:
+            return
+
+        self._extract_sensors(message, telegram)
+
+    def _extract_sensors(self, msg: ParsedMessage, telegram: EbusTelegram) -> None:
         ts = msg.timestamp
-        resp = msg.response_data
-        query = msg.query_data
+        data = telegram.data or b''
+        resp = telegram.response_data or b''
 
-        # === status_temps (B511) ===
-        if msg.name == "status_temps":
-            query_type = query.get("query_type", -1)
+        # === B511: Status/Temps ===
+        if msg.name == "status_temps" and len(data) >= 1:
+            query_type = data[0]
 
-            if query_type == 1:
-                # Type 1: Flow/Return temps, pressure, status flags
-                # Response: byte0=flow/2, byte1=return/2, ..., byte6=pressure/10, ..., byte8=flags
+            if query_type == 1 and len(resp) >= 9:
+                # Type 1: Flow temp, Return temp, Status
+                # byte[0] = flow temp ÷ 2
+                # byte[1] = return temp ÷ 2
+                # byte[5] = status byte
 
-                byte0 = resp.get("byte0")
-                if byte0 is not None and byte0 != 255:
-                    flow_temp = byte0 / 2.0
-                    if 0 < flow_temp < 100:
-                        self._set_sensor("boiler.flow_temperature", round(flow_temp, 1), "°C", ts,
-                                        "Flow temperature (Vorlauf)")
+                if resp[0] != 0xFF:
+                    flow = resp[0] / 2.0
+                    if 0 < flow < 100:
+                        self._set_sensor("boiler.flow_temperature", round(flow, 1), "°C", ts,
+                                         "Flow temperature (Vorlauf)")
 
-                byte1 = resp.get("byte1")
-                if byte1 is not None and byte1 != 255:
-                    return_temp = byte1 / 2.0
-                    if 0 < return_temp < 100:
-                        self._set_sensor("boiler.return_temperature", round(return_temp, 1), "°C", ts,
-                                        "Return temperature (Rücklauf)")
+                if resp[1] != 0xFF:
+                    ret = resp[1] / 2.0
+                    if 0 < ret < 100:
+                        self._set_sensor("boiler.return_temperature", round(ret, 1), "°C", ts,
+                                         "Return temperature (Rücklauf)")
 
-                # Pressure: byte 6 ÷ 10
-                byte6 = resp.get("byte6")
-                if byte6 is not None and byte6 != 255:
-                    pressure = byte6 / 10.0
+                # Status byte at position 5
+                status = resp[5]
+                self._set_sensor("boiler.status_code", status, "", ts)
+
+                # Decode status bits (based on common patterns)
+                self._set_sensor("boiler.heating_demand", bool(status & 0x40), "", ts, "Heating demand")
+                self._set_sensor("boiler.pump_running", bool(status & 0x08), "", ts, "Pump running")
+
+            elif query_type == 0 and len(resp) >= 9:
+                # Type 0: Extended status with PRESSURE
+                # byte[2] = pressure ÷ 10
+                # byte[7] = another status byte (0x83 seen)
+
+                if resp[2] != 0xFF:
+                    pressure = resp[2] / 10.0
                     if 0.1 <= pressure <= 4.0:
                         self._set_sensor("boiler.water_pressure", round(pressure, 1), "bar", ts,
-                                        "System water pressure")
+                                         "System water pressure")
 
-                # Status flags in byte 8 (or last byte)
-                byte8 = resp.get("byte8")
-                if byte8 is not None:
-                    self._set_sensor("boiler.flame_on", bool(byte8 & 0x01), "", ts, "Burner flame")
-                    self._set_sensor("boiler.pump_running", bool(byte8 & 0x02), "", ts, "Pump running")
+                # Extended status from byte 7
+                if resp[7] != 0xFF:
+                    ext_status = resp[7]
+                    # 0x83 = flame on, pump on, heating
+                    self._set_sensor("boiler.flame_on", bool(ext_status & 0x01), "", ts, "Burner flame")
+                    self._set_sensor("boiler.pump_active", bool(ext_status & 0x02), "", ts, "Pump active")
+                    self._set_sensor("boiler.dhw_mode", bool(ext_status & 0x80), "", ts, "DHW mode")
 
-                # Status byte (byte 5)
-                status = resp.get("status_byte")
-                if status is not None:
-                    self._set_sensor("boiler.status_code", status, "", ts)
-                    # Try additional status decoding
-                    self._set_sensor("boiler.heating_demand", bool(status & 0x10), "", ts, "Heating demand")
-                    self._set_sensor("boiler.dhw_demand", bool(status & 0x80), "", ts, "DHW demand")
+            elif query_type == 2 and len(resp) >= 6:
+                # Type 2: Setpoints and modulation data
+                # byte[0] = modulation %
+                # byte[1] = outdoor cutoff setpoint (as-is °C)
 
-            elif query_type == 2:
-                # Type 2: Modulation data
-                byte0 = resp.get("byte0")
-                if byte0 is not None and byte0 != 255:
-                    if 0 <= byte0 <= 100:
-                        self._set_sensor("boiler.burner_modulation", byte0, "%", ts,
-                                        "Burner modulation level")
+                if resp[0] != 0xFF and resp[0] <= 100:
+                    self._set_sensor("boiler.burner_modulation", resp[0], "%", ts,
+                                     "Burner modulation")
 
-            elif query_type == 0:
-                # Type 0: Extended status - possibly contains other temps
-                pass
+                if resp[1] != 0xFF:
+                    cutoff = resp[1]
+                    if 5 <= cutoff <= 30:
+                        self._set_sensor("mipro.outdoor_cutoff", cutoff, "°C", ts,
+                                         "Outdoor cutoff setpoint")
 
-        # === modulation_outdoor (B504) ===
-        elif msg.name == "modulation_outdoor":
-            # Modulation: byte 0
-            mod = resp.get("modulation")
-            if mod is not None and mod != 255:
-                if 0 <= mod <= 100:
-                    self._set_sensor("boiler.burner_modulation", mod, "%", ts,
-                                    "Burner modulation level")
+        # === B504: Modulation and OUTDOOR TEMP ===
+        elif msg.name == "modulation_outdoor" and len(resp) >= 10:
+            # byte[0] = modulation %
+            # bytes[8:9] = outdoor temp as int16_le ÷ 256
 
-            # Outdoor temp: bytes 1-2 as signed int16 ÷ 256
-            outdoor_raw = resp.get("outdoor_temp_raw")
-            if outdoor_raw is not None and outdoor_raw != -1 and outdoor_raw != 32767:
+            if resp[0] != 0xFF and resp[0] <= 100:
+                self._set_sensor("boiler.burner_modulation", resp[0], "%", ts,
+                                 "Burner modulation")
+
+            # Outdoor temperature from bytes 8-9
+            outdoor_raw = int.from_bytes(resp[8:10], 'little', signed=True)
+            if outdoor_raw != -1 and outdoor_raw != 32767:
                 outdoor = outdoor_raw / 256.0
                 if -40 <= outdoor <= 50:
                     self._set_sensor("boiler.outdoor_temperature", round(outdoor, 1), "°C", ts,
-                                    "Outdoor temperature")
+                                     "Outdoor temperature")
 
-        # === temp_setpoint (B510) ===
-        elif msg.name == "temp_setpoint":
-            mode1 = query.get("mode1", 255)
+        # === B510: Setpoints ===
+        elif msg.name == "temp_setpoint" and len(data) >= 6:
+            mode1 = data[0]
 
-            # Main setpoint (mode1=0)
             if mode1 == 0:
-                # Target flow temp: byte 2 ÷ 2
-                target = query.get("target_flow_temp")
-                if target is not None and 20 <= target <= 80:
-                    self._set_sensor("mipro.target_flow_temp", target, "°C", ts,
-                                    "Target flow temperature")
+                # byte[2] = target flow temp ÷ 2
+                if data[2] != 0xFF:
+                    target = data[2] / 2.0
+                    if 20 <= target <= 80:
+                        self._set_sensor("mipro.target_flow_temp", round(target, 1), "°C", ts,
+                                         "Target flow temperature")
 
-                # DHW setpoint: byte 3 ÷ 2 (if valid)
-                dhw = query.get("dhw_setpoint")
-                if dhw is not None and 30 <= dhw <= 65:
-                    self._set_sensor("mipro.dhw_setpoint", dhw, "°C", ts,
-                                    "DHW temperature setpoint")
+                # byte[3] = DHW setpoint ÷ 2 (if valid)
+                if data[3] != 0xFF:
+                    dhw = data[3] / 2.0
+                    if 30 <= dhw <= 65:
+                        self._set_sensor("mipro.dhw_setpoint", round(dhw, 1), "°C", ts,
+                                         "DHW setpoint")
 
-        # === room_temp (B509) ===
-        elif msg.name == "room_temp":
-            room = query.get("room_temp")
-            if room is not None and 5 <= room <= 35:
-                self._set_sensor("mipro.room_temperature", room, "°C", ts,
-                                "Room temperature")
+        # === B509: Room Temp ===
+        elif msg.name == "room_temp" and len(data) >= 2:
+            # byte[0] = room temp ÷ 2
+            if data[0] != 0xFF:
+                room = data[0] / 2.0
+                if 5 <= room <= 35:
+                    self._set_sensor("mipro.room_temperature", round(room, 1), "°C", ts,
+                                     "Room temperature")
 
-            adj = query.get("room_setpoint_adjust")
-            if adj is not None and adj != 127 and adj != -128:
+            # byte[1] = room setpoint adjust
+            if data[1] != 0xFF and data[1] != 0x7F:
+                adj = int.from_bytes([data[1]], 'little', signed=True)
                 self._set_sensor("mipro.room_setpoint_adjust", adj, "", ts,
-                                "Room setpoint adjustment")
+                                 "Room setpoint adjustment")
 
-        # === datetime (B516) ===
-        elif msg.name == "datetime":
-            flags = query.get("flags", 255)
+        # === B516: DateTime ===
+        elif msg.name == "datetime" and len(data) >= 8:
+            flags = data[0]
 
-            if flags == 0:  # Full datetime message
-                h = query.get("hours")
-                m = query.get("minutes")
-                s = query.get("seconds")
+            if flags == 0:  # Full datetime
+                # BCD decoding
+                def bcd(b):
+                    high = (b >> 4) & 0x0F
+                    low = b & 0x0F
+                    if high > 9 or low > 9:
+                        return None
+                    return high * 10 + low
 
-                if h is not None and m is not None and s is not None:
+                s = bcd(data[1])
+                m = bcd(data[2])
+                h = bcd(data[3])
+
+                if s is not None and m is not None and h is not None:
                     if h < 24 and m < 60 and s < 60:
                         self._set_sensor("mipro.time", f"{h:02d}:{m:02d}:{s:02d}", "", ts)
 
-                day = query.get("day")
-                month = query.get("month")
-                year = query.get("year")
+                day = bcd(data[4])
+                month = bcd(data[5])
+                year = bcd(data[7])
 
                 if day and month and year is not None:
                     if 1 <= day <= 31 and 1 <= month <= 12:
-                        year_full = 2000 + year if year < 100 else year
+                        year_full = 2000 + year
                         self._set_sensor("mipro.date", f"{year_full}-{month:02d}-{day:02d}", "", ts)
 
     def _set_sensor(self, name: str, value: Any, unit: str,
-                   timestamp: datetime, description: str = "") -> None:
+                    timestamp: datetime, description: str = "") -> None:
         self._sensors[name] = {
             "value": value,
             "unit": unit,
@@ -349,9 +374,11 @@ class DataAggregator:
             print("\n🔥 BOILER (Thelia Condens):")
 
             # Temperatures
-            print("   ── Temperatures ──")
-            for k in ["flow_temperature", "return_temperature", "outdoor_temperature"]:
-                if k in boiler:
+            temp_order = ["flow_temperature", "return_temperature", "outdoor_temperature"]
+            temps_found = [k for k in temp_order if k in boiler]
+            if temps_found:
+                print("   ── Temperatures ──")
+                for k in temps_found:
                     self._print_sensor(k, boiler[k])
 
             # Pressure
@@ -364,18 +391,23 @@ class DataAggregator:
                 print("   ── Burner ──")
                 self._print_sensor("burner_modulation", boiler["burner_modulation"])
 
-            # Status
-            print("   ── Status ──")
-            for k in ["flame_on", "pump_running", "heating_demand", "dhw_demand"]:
-                if k in boiler:
+            # Status flags
+            status_keys = ["flame_on", "pump_running", "pump_active", "heating_demand", "dhw_mode"]
+            status_found = [k for k in status_keys if k in boiler]
+            if status_found:
+                print("   ── Status ──")
+                for k in status_found:
                     self._print_sensor(k, boiler[k])
 
             if "status_code" in boiler:
-                print(f"   status_code              : {boiler['status_code']['value']} (raw hex: 0x{boiler['status_code']['value']:02X})")
+                val = boiler['status_code']['value']
+                print(f"   status_code              : {val} (0x{val:02X})")
 
         if mipro:
             print("\n📱 MIPRO Controller:")
-            for k in ["room_temperature", "target_flow_temp", "dhw_setpoint", "room_setpoint_adjust", "time", "date"]:
+            order = ["room_temperature", "target_flow_temp", "dhw_setpoint",
+                     "outdoor_cutoff", "room_setpoint_adjust", "time", "date"]
+            for k in order:
                 if k in mipro:
                     self._print_sensor(k, mipro[k])
 
