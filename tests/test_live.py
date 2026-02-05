@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Live test with alerts."""
+"""Live test with corrected alerts."""
 
 import sys
 import os
@@ -14,9 +14,9 @@ from thelia.alerts import AlertManager, Alert
 
 def on_alert(alert: Alert):
     """Callback for new alerts."""
-    print(f"\n{'!' * 50}")
+    print(f"\n{'!' * 60}")
     print(f"{alert}")
-    print(f"{'!' * 50}\n")
+    print(f"{'!' * 60}\n")
 
 
 def main():
@@ -25,6 +25,12 @@ def main():
     print("=" * 70)
     print("🔥 Thelia Condens Monitor with Alerts")
     print("=" * 70)
+    print("\nMonitoring for:")
+    print("  ⚠️  Low pressure    < 0.8 bar")
+    print("  ⚠️  High pressure   > 2.5 bar")
+    print("  ℹ️  Not condensing  return > 55°C")
+    print("  ⚠️  High ΔT         > 20°C")
+    print("=" * 70)
 
     config = ConnectionConfig(port=PORT, baudrate=2400)
     connection = SerialConnection(config)
@@ -32,7 +38,6 @@ def main():
     aggregator = DataAggregator()
     alert_manager = AlertManager()
 
-    # Register callbacks
     parser.register_callback(aggregator.update)
     alert_manager.register_callback(on_alert)
 
@@ -41,15 +46,10 @@ def main():
         return
 
     print("✅ Connected!\n")
-    print("Monitoring for alerts...")
-    print("  - Low pressure < 0.8 bar")
-    print("  - High pressure > 2.5 bar")
-    print("  - High return temp > 55°C (no condensing)")
-    print("  - Fault codes")
-    print("=" * 70)
 
     try:
         count = 0
+        displayed = 0
         last_summary = time.time()
         last_alert_check = time.time()
         device_id_count = 0
@@ -65,24 +65,20 @@ def main():
 
             ts = msg.timestamp.strftime("%H:%M:%S")
 
-            # Print message (optional - comment out for quiet mode)
-            if msg.name != "unknown":
-                print(f"[{count:3d}] {ts} {msg.name}")
+            # Only show important messages
+            if msg.name in ("status_temps", "modulation_outdoor", "temp_setpoint", "room_temp"):
+                displayed += 1
+                if displayed <= 30:  # Limit output
+                    print(f"[{count:3d}] {ts} {msg.name}")
 
             # Check alerts every 10 seconds
             if time.time() - last_alert_check > 10:
                 sensors = aggregator.get_all_sensors()
                 alert_manager.check_sensors(sensors)
                 alert_manager.check_sensor_staleness(sensors)
-
-                # Check fault code if available
-                if "boiler.status_code" in sensors:
-                    status = sensors["boiler.status_code"]["value"]
-                    alert_manager.check_fault_code(status)
-
                 last_alert_check = time.time()
 
-            # Print status every 60 seconds
+            # Print full status every 60 seconds
             if time.time() - last_summary > 60:
                 aggregator.print_status()
                 alert_manager.print_status()

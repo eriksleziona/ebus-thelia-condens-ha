@@ -6,7 +6,7 @@ Monitors sensor values and triggers alerts.
 import logging
 from typing import Dict, Any, Optional, List, Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime
 from enum import Enum
 
 
@@ -21,8 +21,7 @@ class AlertType(Enum):
     HIGH_PRESSURE = "high_pressure"
     HIGH_RETURN_TEMP = "high_return_temp"
     NO_CONDENSING = "no_condensing"
-    FLAME_FAILURE = "flame_failure"
-    PUMP_FAILURE = "pump_failure"
+    HIGH_DELTA_T = "high_delta_t"
     COMMUNICATION_ERROR = "communication_error"
     FAULT_CODE = "fault_code"
     SENSOR_STALE = "sensor_stale"
@@ -64,11 +63,28 @@ class AlertThreshold:
     """Defines an alert threshold."""
     alert_type: AlertType
     sensor_name: str
-    min_value: Optional[float] = None
-    max_value: Optional[float] = None
+    condition: str  # "less_than", "greater_than", "equals"
+    threshold_value: float
     severity: AlertSeverity = AlertSeverity.WARNING
     message_template: str = ""
-    cooldown_seconds: float = 300.0  # Don't repeat same alert within this time
+    cooldown_seconds: float = 300.0
+
+    def is_triggered(self, value: Any) -> bool:
+        """Check if threshold is triggered."""
+        if value is None:
+            return False
+
+        try:
+            if self.condition == "less_than":
+                return float(value) < self.threshold_value
+            elif self.condition == "greater_than":
+                return float(value) > self.threshold_value
+            elif self.condition == "equals":
+                return value == self.threshold_value
+            else:
+                return False
+        except (TypeError, ValueError):
+            return False
 
 
 class AlertManager:
@@ -78,27 +94,10 @@ class AlertManager:
     Default thresholds:
     - Water pressure: < 0.8 bar (warning), < 0.5 bar (critical)
     - Water pressure: > 2.5 bar (warning), > 3.0 bar (critical)
-    - Return temperature: > 55°C (warning - no condensing)
-    - Return temperature: > 65°C (critical)
+    - Return temperature: > 55°C (info - not condensing)
+    - Return temperature: > 65°C (warning)
+    - Delta T: > 20°C (warning - system might be undersized)
     """
-
-    # Known fault codes for Saunier Duval / Vaillant
-    FAULT_CODES = {
-        0: "No fault",
-        1: "Ignition failure",
-        2: "Flame loss during operation",
-        3: "Overheating",
-        4: "Low water pressure",
-        5: "Flue sensor fault",
-        6: "Fan fault",
-        10: "Flow sensor fault",
-        11: "Return sensor fault",
-        12: "Outdoor sensor fault",
-        20: "Communication error",
-        28: "Flue temperature too high",
-        29: "Return temperature too high",
-        # Add more as discovered
-    }
 
     def __init__(self):
         self.logger = logging.getLogger(self.__class__.__name__)
@@ -108,75 +107,86 @@ class AlertManager:
         self._last_alert_time: Dict[str, datetime] = {}
         self._callbacks: List[Callable[[Alert], None]] = []
 
-        # Setup default thresholds
+        # Track fault codes separately (from specific fault messages, not status byte)
+        self._known_fault = False
+
         self._setup_default_thresholds()
 
     def _setup_default_thresholds(self) -> None:
         """Setup default alert thresholds."""
 
-        # Pressure alerts
+        # Low pressure alerts
         self.add_threshold(AlertThreshold(
             alert_type=AlertType.LOW_PRESSURE,
             sensor_name="boiler.water_pressure",
-            max_value=0.8,
+            condition="less_than",
+            threshold_value=0.8,
             severity=AlertSeverity.WARNING,
-            message_template="Low water pressure: {value} bar (threshold: {threshold} bar)",
+            message_template="Low water pressure: {value:.1f} bar (min: 0.8 bar) - may need refilling",
             cooldown_seconds=600,
         ))
 
         self.add_threshold(AlertThreshold(
             alert_type=AlertType.LOW_PRESSURE,
             sensor_name="boiler.water_pressure",
-            max_value=0.5,
+            condition="less_than",
+            threshold_value=0.5,
             severity=AlertSeverity.CRITICAL,
-            message_template="CRITICAL: Very low water pressure: {value} bar",
+            message_template="CRITICAL: Very low pressure {value:.1f} bar - boiler may lock out!",
             cooldown_seconds=300,
         ))
 
+        # High pressure alerts
         self.add_threshold(AlertThreshold(
             alert_type=AlertType.HIGH_PRESSURE,
             sensor_name="boiler.water_pressure",
-            min_value=2.5,
+            condition="greater_than",
+            threshold_value=2.5,
             severity=AlertSeverity.WARNING,
-            message_template="High water pressure: {value} bar (threshold: {threshold} bar)",
+            message_template="High water pressure: {value:.1f} bar (max: 2.5 bar)",
             cooldown_seconds=600,
         ))
 
         self.add_threshold(AlertThreshold(
             alert_type=AlertType.HIGH_PRESSURE,
             sensor_name="boiler.water_pressure",
-            min_value=3.0,
+            condition="greater_than",
+            threshold_value=3.0,
             severity=AlertSeverity.CRITICAL,
-            message_template="CRITICAL: Very high water pressure: {value} bar - check expansion vessel!",
+            message_template="CRITICAL: Pressure {value:.1f} bar - check expansion vessel!",
             cooldown_seconds=300,
         ))
 
-        # Return temperature alerts (condensing efficiency)
+        # Return temperature - condensing efficiency
         self.add_threshold(AlertThreshold(
             alert_type=AlertType.NO_CONDENSING,
             sensor_name="boiler.return_temperature",
-            min_value=55.0,
+            condition="greater_than",
+            threshold_value=55.0,
             severity=AlertSeverity.INFO,
-            message_template="Return temp {value}°C - boiler not condensing (efficiency reduced)",
-            cooldown_seconds=1800,  # Only every 30 min
+            message_template="Return temp {value:.1f}°C > 55°C - boiler not condensing (reduced efficiency)",
+            cooldown_seconds=3600,  # Only once per hour
         ))
 
         self.add_threshold(AlertThreshold(
             alert_type=AlertType.HIGH_RETURN_TEMP,
             sensor_name="boiler.return_temperature",
-            min_value=65.0,
+            condition="greater_than",
+            threshold_value=70.0,
             severity=AlertSeverity.WARNING,
-            message_template="High return temperature: {value}°C - check system balance",
+            message_template="High return temperature: {value:.1f}°C - check radiator valves",
             cooldown_seconds=900,
         ))
 
+        # High Delta T - system might be undersized or pump too slow
         self.add_threshold(AlertThreshold(
-            alert_type=AlertType.HIGH_RETURN_TEMP,
-            sensor_name="boiler.return_temperature",
-            min_value=75.0,
-            severity=AlertSeverity.CRITICAL,
-            message_template="CRITICAL: Very high return temperature: {value}°C",
-            cooldown_seconds=300,
+            alert_type=AlertType.HIGH_DELTA_T,
+            sensor_name="boiler.delta_t",
+            condition="greater_than",
+            threshold_value=20.0,
+            severity=AlertSeverity.WARNING,
+            message_template="High temperature drop ΔT={value:.1f}°C - check pump speed or system sizing",
+            cooldown_seconds=1800,
         ))
 
     def add_threshold(self, threshold: AlertThreshold) -> None:
@@ -212,102 +222,46 @@ class AlertManager:
             if value is None:
                 continue
 
-            # Check if threshold is violated
-            triggered = False
-            trigger_threshold = None
+            # Skip boolean values for numeric thresholds
+            if isinstance(value, bool):
+                continue
 
-            if threshold.min_value is not None and value >= threshold.min_value:
-                triggered = True
-                trigger_threshold = threshold.min_value
+            # Check if threshold is triggered
+            if not threshold.is_triggered(value):
+                continue
 
-            if threshold.max_value is not None and value <= threshold.max_value:
-                triggered = True
-                trigger_threshold = threshold.max_value
+            # Check cooldown
+            alert_key = f"{threshold.alert_type.value}_{threshold.severity.value}"
+            last_time = self._last_alert_time.get(alert_key)
 
-            if triggered:
-                # Check cooldown
-                alert_key = f"{threshold.alert_type.value}_{threshold.severity.value}"
-                last_time = self._last_alert_time.get(alert_key)
+            if last_time and (now - last_time).total_seconds() < threshold.cooldown_seconds:
+                continue
 
-                if last_time and (now - last_time).total_seconds() < threshold.cooldown_seconds:
-                    continue  # Still in cooldown
+            # Create alert
+            message = threshold.message_template.format(value=value)
 
-                # Create alert
-                message = threshold.message_template.format(
-                    value=value,
-                    threshold=trigger_threshold
-                )
+            alert = Alert(
+                alert_type=threshold.alert_type,
+                severity=threshold.severity,
+                message=message,
+                value=value,
+                threshold=threshold.threshold_value,
+                timestamp=now,
+            )
 
-                alert = Alert(
-                    alert_type=threshold.alert_type,
-                    severity=threshold.severity,
-                    message=message,
-                    value=value,
-                    threshold=trigger_threshold,
-                    timestamp=now,
-                )
+            new_alerts.append(alert)
+            self._active_alerts[alert_key] = alert
+            self._alert_history.append(alert)
+            self._last_alert_time[alert_key] = now
 
-                new_alerts.append(alert)
-                self._active_alerts[alert_key] = alert
-                self._alert_history.append(alert)
-                self._last_alert_time[alert_key] = now
-
-                # Notify callbacks
-                for callback in self._callbacks:
-                    try:
-                        callback(alert)
-                    except Exception as e:
-                        self.logger.error(f"Alert callback error: {e}")
+            # Notify callbacks
+            for callback in self._callbacks:
+                try:
+                    callback(alert)
+                except Exception as e:
+                    self.logger.error(f"Alert callback error: {e}")
 
         return new_alerts
-
-    def check_fault_code(self, status_code: int) -> Optional[Alert]:
-        """
-        Check for fault codes in status byte.
-
-        Args:
-            status_code: Raw status code from boiler
-
-        Returns:
-            Alert if fault detected, None otherwise
-        """
-        # Extract fault code (implementation depends on your boiler)
-        # This is a simplified example
-        fault_code = status_code & 0x0F  # Lower nibble might be fault
-
-        if fault_code == 0:
-            # Clear any existing fault alert
-            if "fault_code" in self._active_alerts:
-                del self._active_alerts["fault_code"]
-            return None
-
-        # Check cooldown
-        now = datetime.now()
-        last_time = self._last_alert_time.get("fault_code")
-        if last_time and (now - last_time).total_seconds() < 300:
-            return None
-
-        fault_message = self.FAULT_CODES.get(fault_code, f"Unknown fault code: {fault_code}")
-
-        alert = Alert(
-            alert_type=AlertType.FAULT_CODE,
-            severity=AlertSeverity.CRITICAL,
-            message=f"BOILER FAULT: {fault_message} (code: {fault_code})",
-            value=fault_code,
-            timestamp=now,
-        )
-
-        self._active_alerts["fault_code"] = alert
-        self._alert_history.append(alert)
-        self._last_alert_time["fault_code"] = now
-
-        for callback in self._callbacks:
-            try:
-                callback(alert)
-            except Exception as e:
-                self.logger.error(f"Alert callback error: {e}")
-
-        return alert
 
     def check_sensor_staleness(self, sensors: Dict[str, Dict], max_age: float = 300.0) -> List[Alert]:
         """Check if critical sensors have gone stale."""
@@ -327,69 +281,4 @@ class AlertManager:
 
             if age > max_age:
                 alert_key = f"stale_{sensor_name}"
-                last_time = self._last_alert_time.get(alert_key)
-
-                if last_time and (now - last_time).total_seconds() < 600:
-                    continue
-
-                alert = Alert(
-                    alert_type=AlertType.SENSOR_STALE,
-                    severity=AlertSeverity.WARNING,
-                    message=f"Sensor {sensor_name} data is stale ({age:.0f}s old)",
-                    value=age,
-                    threshold=max_age,
-                    timestamp=now,
-                )
-
-                new_alerts.append(alert)
-                self._last_alert_time[alert_key] = now
-
-                for callback in self._callbacks:
-                    try:
-                        callback(alert)
-                    except Exception as e:
-                        self.logger.error(f"Alert callback error: {e}")
-
-        return new_alerts
-
-    def get_active_alerts(self) -> List[Alert]:
-        """Get list of currently active alerts."""
-        return list(self._active_alerts.values())
-
-    def get_alert_history(self, max_count: int = 100) -> List[Alert]:
-        """Get recent alert history."""
-        return self._alert_history[-max_count:]
-
-    def acknowledge_alert(self, alert_key: str) -> bool:
-        """Acknowledge an alert."""
-        if alert_key in self._active_alerts:
-            self._active_alerts[alert_key].acknowledged = True
-            return True
-        return False
-
-    def clear_alert(self, alert_key: str) -> bool:
-        """Clear an active alert."""
-        if alert_key in self._active_alerts:
-            del self._active_alerts[alert_key]
-            return True
-        return False
-
-    def print_status(self) -> None:
-        """Print current alert status."""
-        active = self.get_active_alerts()
-
-        if not active:
-            print("\n✅ No active alerts")
-            return
-
-        print("\n" + "=" * 50)
-        print("🚨 ACTIVE ALERTS")
-        print("=" * 50)
-
-        for alert in sorted(active, key=lambda a: a.severity.value, reverse=True):
-            print(f"\n{alert}")
-            print(f"   Time: {alert.timestamp.strftime('%Y-%m-%d %H:%M:%S')}")
-            if alert.value is not None:
-                print(f"   Value: {alert.value}")
-
-        print("\n" + "=" * 50)
+                last_time =
