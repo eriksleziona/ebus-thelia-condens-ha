@@ -1,5 +1,6 @@
 """
-Thelia + MiPro parser with all verified sensors including Delta T.
+Thelia + MiPro parser with all sensors including DHW tank.
+For system boiler with storage cylinder.
 """
 
 import logging
@@ -9,6 +10,7 @@ from datetime import datetime
 
 from ebus_core.telegram import EbusTelegram
 from .messages import MessageDefinition, get_message_definition
+
 
 EBUS_ADDRESSES = {
     0x00: "broadcast_0",
@@ -148,28 +150,30 @@ class DataAggregator:
     """
     Aggregates sensor values from verified byte positions:
 
-    B511 type 1 response:
+    B511 Type 1 (Query 0x01) - Temperatures:
       byte[0] ÷ 2 = Flow temperature
       byte[1] ÷ 2 = Return temperature
-      byte[5] = Status byte
+      byte[5] ÷ 2 = DHW tank temperature
 
-    B511 type 0 response:
+    B511 Type 0 (Query 0x00) - Extended Status:
       byte[2] ÷ 10 = Water pressure
-      byte[7] = Extended status (flame, pump, etc.)
+      byte[7] = Status flags (flame, pump, heating, dhw)
 
-    B511 type 2 response:
+    B511 Type 2 (Query 0x02) - Setpoints:
       byte[0] = Modulation %
-      byte[1] = Outdoor cutoff setpoint
+      byte[1] = Outdoor cutoff (raw, NOT ÷2!)
+      byte[2] ÷ 2 = Max flow temp
+      byte[3] ÷ 2 = DHW setpoint
+      byte[4] ÷ 2 = Legionella temp
 
-    B504 response:
+    B504 - Outdoor Temperature:
       byte[0] = Modulation %
       bytes[8:9] int16_le ÷ 256 = Outdoor temperature
 
-    B510 query:
+    B510 - Target Flow:
       byte[2] ÷ 2 = Target flow temperature
-      byte[3] ÷ 2 = DHW setpoint (if not 0xFF)
 
-    B509 query:
+    B509 - Room Temperature:
       byte[0] ÷ 2 = Room temperature
     """
 
@@ -198,76 +202,92 @@ class DataAggregator:
             query_type = data[0]
 
             if query_type == 1 and len(resp) >= 6:
-                # Type 1: Flow temp, Return temp, Status
-                flow = None
-                ret = None
-
+                # Type 1: Flow, Return, DHW Tank temperatures
                 if resp[0] != 0xFF:
                     flow = resp[0] / 2.0
                     if 0 < flow < 100:
                         self._set_sensor("boiler.flow_temperature", round(flow, 1), "°C", ts,
-                                         "Flow temperature (Vorlauf)")
+                                        "Flow temperature (Vorlauf)")
 
                 if resp[1] != 0xFF:
                     ret = resp[1] / 2.0
                     if 0 < ret < 100:
                         self._set_sensor("boiler.return_temperature", round(ret, 1), "°C", ts,
-                                         "Return temperature (Rücklauf)")
+                                        "Return temperature (Rücklauf)")
+
+                # DHW Tank temperature - byte[5]
+                if resp[5] != 0xFF:
+                    dhw_tank = resp[5] / 2.0
+                    if 10 <= dhw_tank <= 85:
+                        self._set_sensor("boiler.dhw_tank_temperature", round(dhw_tank, 1), "°C", ts,
+                                        "DHW cylinder temperature")
 
                 # Calculate Delta T
-                if flow is not None and ret is not None and flow > 0 and ret > 0:
-                    delta_t = flow - ret
-                    self._set_sensor("boiler.delta_t", round(delta_t, 1), "°C", ts,
-                                     "Temperature difference (Flow - Return)")
-
-                    # Condensing indicator: Return < 55°C means condensing is possible
-                    is_condensing = ret < 55.0
-                    self._set_sensor("boiler.condensing_possible", is_condensing, "", ts,
-                                     "Return temp allows condensation (<55°C)")
-
-                # Status byte at position 5
-                if resp[5] != 0xFF:
-                    status = resp[5]
-                    self._set_sensor("boiler.status_code", status, "", ts)
+                flow_val = self.get_sensor("boiler.flow_temperature")
+                ret_val = self.get_sensor("boiler.return_temperature")
+                if flow_val and ret_val:
+                    delta = flow_val - ret_val
+                    self._set_sensor("boiler.delta_t", round(delta, 1), "°C", ts,
+                                    "Temperature difference (Flow - Return)")
+                    self._set_sensor("boiler.condensing_possible", ret_val < 55.0, "", ts,
+                                    "Return temp allows condensation (<55°C)")
 
             elif query_type == 0 and len(resp) >= 8:
-                # Type 0: Extended status with PRESSURE
-                # byte[2] = pressure ÷ 10
+                # Type 0: Extended status with pressure
                 if resp[2] != 0xFF:
                     pressure = resp[2] / 10.0
                     if 0.1 <= pressure <= 4.0:
                         self._set_sensor("boiler.water_pressure", round(pressure, 1), "bar", ts,
-                                         "System water pressure")
+                                        "System water pressure")
 
-                # Extended status from byte 7
                 if resp[7] != 0xFF:
                     ext_status = resp[7]
-                    # 0x83 = 1000 0011: bit 0 = flame, bit 1 = pump, bit 7 = heating
                     self._set_sensor("boiler.flame_on", bool(ext_status & 0x01), "", ts,
-                                     "Burner flame active")
+                                    "Burner flame active")
                     self._set_sensor("boiler.pump_running", bool(ext_status & 0x02), "", ts,
-                                     "Circulation pump running")
+                                    "Circulation pump running")
+                    self._set_sensor("boiler.dhw_active", bool(ext_status & 0x04), "", ts,
+                                    "DHW heating active")
                     self._set_sensor("boiler.heating_active", bool(ext_status & 0x80), "", ts,
-                                     "Heating mode active")
+                                    "Heating mode active")
 
-            elif query_type == 2 and len(resp) >= 2:
+            elif query_type == 2 and len(resp) >= 5:
                 # Type 2: Modulation and setpoints
                 if resp[0] != 0xFF and resp[0] <= 100:
                     self._set_sensor("boiler.burner_modulation", resp[0], "%", ts,
-                                     "Burner modulation level")
+                                    "Burner modulation level")
 
-                if resp[1] != 0xFF:
-                    cutoff = resp[1]
-                    if 5 <= cutoff <= 30:
-                        self._set_sensor("mipro.outdoor_cutoff", cutoff, "°C", ts,
-                                         "Outdoor cutoff setpoint (heating off when outdoor > this)")
+                # Outdoor cutoff - NOT divided by 2!
+                if resp[1] != 0xFF and 5 <= resp[1] <= 30:
+                    self._set_sensor("mipro.outdoor_cutoff", resp[1], "°C", ts,
+                                    "Outdoor cutoff setpoint")
 
-        # === B504: Modulation and OUTDOOR TEMP ===
+                # Max flow temperature
+                if resp[2] != 0xFF:
+                    max_flow = resp[2] / 2.0
+                    if 40 <= max_flow <= 90:
+                        self._set_sensor("mipro.max_flow_temp", round(max_flow, 1), "°C", ts,
+                                        "Maximum flow temperature")
+
+                # DHW setpoint
+                if resp[3] != 0xFF:
+                    dhw_sp = resp[3] / 2.0
+                    if 35 <= dhw_sp <= 70:
+                        self._set_sensor("mipro.dhw_setpoint", round(dhw_sp, 1), "°C", ts,
+                                        "DHW temperature setpoint")
+
+                # Legionella temperature
+                if len(resp) >= 5 and resp[4] != 0xFF:
+                    legionella = resp[4] / 2.0
+                    if 55 <= legionella <= 75:
+                        self._set_sensor("mipro.dhw_legionella_temp", round(legionella, 1), "°C", ts,
+                                        "DHW Legionella cycle temperature")
+
+        # === B504: Modulation and Outdoor Temperature ===
         elif msg.name == "modulation_outdoor" and len(resp) >= 10:
-            # byte[0] = modulation
             if resp[0] != 0xFF and resp[0] <= 100:
                 self._set_sensor("boiler.burner_modulation", resp[0], "%", ts,
-                                 "Burner modulation level")
+                                "Burner modulation level")
 
             # Outdoor temperature from bytes 8-9 (int16_le ÷ 256)
             outdoor_raw = int.from_bytes(resp[8:10], 'little', signed=True)
@@ -275,40 +295,32 @@ class DataAggregator:
                 outdoor = outdoor_raw / 256.0
                 if -40 <= outdoor <= 50:
                     self._set_sensor("boiler.outdoor_temperature", round(outdoor, 1), "°C", ts,
-                                     "Outdoor temperature")
+                                    "Outdoor temperature")
 
-        # === B510: Setpoints ===
+        # === B510: Target Flow Temp ===
         elif msg.name == "temp_setpoint" and len(data) >= 4:
             mode1 = data[0]
 
             if mode1 == 0:
-                # byte[2] = target flow temp ÷ 2
                 if data[2] != 0xFF:
                     target = data[2] / 2.0
                     if 20 <= target <= 80:
                         self._set_sensor("mipro.target_flow_temp", round(target, 1), "°C", ts,
-                                         "Target flow temperature")
+                                        "Target flow temperature")
 
-                # byte[3] = DHW setpoint ÷ 2 (if valid)
-                if data[3] != 0xFF:
-                    dhw = data[3] / 2.0
-                    if 30 <= dhw <= 65:
-                        self._set_sensor("mipro.dhw_setpoint", round(dhw, 1), "°C", ts,
-                                         "DHW temperature setpoint")
-
-        # === B509: Room Temp ===
+        # === B509: Room Temperature ===
         elif msg.name == "room_temp" and len(data) >= 2:
             if data[0] != 0xFF:
                 room = data[0] / 2.0
                 if 5 <= room <= 35:
                     self._set_sensor("mipro.room_temperature", round(room, 1), "°C", ts,
-                                     "Room temperature")
+                                    "Room temperature")
 
             if data[1] != 0xFF and data[1] != 0x7F:
                 adj = int.from_bytes([data[1]], 'little', signed=True)
                 if -10 <= adj <= 10:
                     self._set_sensor("mipro.room_setpoint_adjust", adj, "", ts,
-                                     "Room setpoint adjustment")
+                                    "Room setpoint adjustment")
 
         # === B516: DateTime ===
         elif msg.name == "datetime" and len(data) >= 8:
@@ -340,7 +352,7 @@ class DataAggregator:
                         self._set_sensor("mipro.date", f"{year_full}-{month:02d}-{day:02d}", "", ts)
 
     def _set_sensor(self, name: str, value: Any, unit: str,
-                    timestamp: datetime, description: str = "") -> None:
+                   timestamp: datetime, description: str = "") -> None:
         self._sensors[name] = {
             "value": value,
             "unit": unit,
@@ -384,15 +396,20 @@ class DataAggregator:
         if boiler:
             print("\n🔥 BOILER (Thelia Condens):")
 
-            # Temperatures
-            temp_order = ["flow_temperature", "return_temperature", "delta_t", "outdoor_temperature"]
-            temps_found = [k for k in temp_order if k in boiler]
-            if temps_found:
-                print("   ── Temperatures ──")
-                for k in temps_found:
+            # Central Heating
+            ch_temps = ["flow_temperature", "return_temperature", "delta_t", "outdoor_temperature"]
+            ch_found = [k for k in ch_temps if k in boiler]
+            if ch_found:
+                print("   ── Central Heating ──")
+                for k in ch_found:
                     self._print_sensor(k, boiler[k])
 
-            # Condensing
+            # DHW Cylinder
+            if "dhw_tank_temperature" in boiler:
+                print("   ── DHW Cylinder ──")
+                self._print_sensor("dhw_tank_temperature", boiler["dhw_tank_temperature"])
+
+            # Efficiency
             if "condensing_possible" in boiler:
                 print("   ── Efficiency ──")
                 self._print_sensor("condensing_possible", boiler["condensing_possible"])
@@ -402,30 +419,52 @@ class DataAggregator:
                 print("   ── Pressure ──")
                 self._print_sensor("water_pressure", boiler["water_pressure"])
 
-            # Modulation
+            # Burner
             if "burner_modulation" in boiler:
                 print("   ── Burner ──")
                 self._print_sensor("burner_modulation", boiler["burner_modulation"])
 
-            # Status flags
-            status_keys = ["flame_on", "pump_running", "heating_active"]
+            # Status
+            status_keys = ["flame_on", "pump_running", "heating_active", "dhw_active"]
             status_found = [k for k in status_keys if k in boiler]
             if status_found:
                 print("   ── Status ──")
                 for k in status_found:
                     self._print_sensor(k, boiler[k])
 
-            if "status_code" in boiler:
-                val = boiler['status_code']['value']
-                print(f"   status_code              : {val} (0x{val:02X})")
-
         if mipro:
             print("\n📱 MIPRO Controller:")
-            order = ["room_temperature", "target_flow_temp", "dhw_setpoint",
-                     "outdoor_cutoff", "room_setpoint_adjust", "time", "date"]
-            for k in order:
-                if k in mipro:
+
+            # Room
+            room_keys = ["room_temperature", "room_setpoint_adjust"]
+            room_found = [k for k in room_keys if k in mipro]
+            if room_found:
+                print("   ── Room ──")
+                for k in room_found:
                     self._print_sensor(k, mipro[k])
+
+            # CH Setpoints
+            ch_sp = ["target_flow_temp", "max_flow_temp", "outdoor_cutoff"]
+            ch_sp_found = [k for k in ch_sp if k in mipro]
+            if ch_sp_found:
+                print("   ── CH Setpoints ──")
+                for k in ch_sp_found:
+                    self._print_sensor(k, mipro[k])
+
+            # DHW Setpoints
+            dhw_sp = ["dhw_setpoint", "dhw_legionella_temp"]
+            dhw_sp_found = [k for k in dhw_sp if k in mipro]
+            if dhw_sp_found:
+                print("   ── DHW Setpoints ──")
+                for k in dhw_sp_found:
+                    self._print_sensor(k, mipro[k])
+
+            # Date/Time
+            if "time" in mipro or "date" in mipro:
+                print("   ── Date/Time ──")
+                for k in ["time", "date"]:
+                    if k in mipro:
+                        self._print_sensor(k, mipro[k])
 
         print("\n" + "=" * 70)
 
