@@ -7,10 +7,12 @@ from dataclasses import dataclass, field
 from typing import Dict, Any, Optional, List
 from enum import Enum
 
+
 # Invalid/Not Available markers
 INVALID_UINT8 = 0xFF
 INVALID_UINT16 = 0xFFFF
 INVALID_INT16 = -1  # 0xFFFF as signed
+
 
 class DataType(Enum):
     UINT8 = "uint8"
@@ -24,6 +26,7 @@ class DataType(Enum):
     BCD = "bcd"
     BIT = "bit"
     BYTES = "bytes"
+
 
 @dataclass
 class FieldDefinition:
@@ -144,9 +147,11 @@ class MessageDefinition:
 
 THELIA_MESSAGES: Dict[tuple, MessageDefinition] = {}
 
+
 def register_message(msg: MessageDefinition) -> MessageDefinition:
     THELIA_MESSAGES[msg.command] = msg
     return msg
+
 
 def get_message_definition(primary: int, secondary: int) -> Optional[MessageDefinition]:
     return THELIA_MESSAGES.get((primary, secondary))
@@ -157,8 +162,6 @@ def get_message_definition(primary: int, secondary: int) -> Optional[MessageDefi
 # ============================================
 
 # B511: Status/Temperature Query (Polymorphic)
-# We map bytes as Generic UINT8 because meanings change by Type (0,1,2).
-# The detailed decoding happens in parser.py -> DataAggregator
 register_message(MessageDefinition(
     name="status_temps",
     primary_command=0xB5,
@@ -192,13 +195,12 @@ register_message(MessageDefinition(
     response_fields=[
         FieldDefinition("modulation", 0, DataType.UINT8, unit="%"),
         FieldDefinition("outdoor_temp_raw", 1, DataType.INT16_LE),
-        # Sometimes outdoor temp is in byte 1 as Data2c on older firmwares
         FieldDefinition("outdoor_temp_backup", 1, DataType.DATA1B),
         FieldDefinition("byte3", 3, DataType.UINT8, ignore_invalid=False),
     ]
 ))
 
-# B510: Temperature Setpoints (Write Command)
+# B510: Target Flow (Write)
 register_message(MessageDefinition(
     name="temp_setpoint",
     primary_command=0xB5,
@@ -218,7 +220,20 @@ register_message(MessageDefinition(
     ]
 ))
 
-# B509: Room Temperature from MiPro
+# B512: Parameter Write (NEW: Catches Instant Changes)
+register_message(MessageDefinition(
+    name="param_write",
+    primary_command=0xB5,
+    secondary_command=0x12,
+    description="Parameter write from MiPro",
+    fields=[
+        FieldDefinition("param_id", 0, DataType.UINT8),
+        FieldDefinition("value_raw", 1, DataType.UINT8),
+    ],
+    response_fields=[]
+))
+
+# B509: Room Temperature
 register_message(MessageDefinition(
     name="room_temp",
     primary_command=0xB5,
@@ -248,21 +263,6 @@ register_message(MessageDefinition(
     ]
 ))
 
-# B512: Unknown / DHW Stats
-register_message(MessageDefinition(
-    name="b512_data",
-    primary_command=0xB5,
-    secondary_command=0x12,
-    description="B512 - possibly DHW or pressure",
-    fields=[
-        FieldDefinition("query_type", 0, DataType.UINT8, ignore_invalid=False),
-        FieldDefinition("data", 1, DataType.BYTES, length=9, ignore_invalid=False),
-    ],
-    response_fields=[
-        FieldDefinition("response", 0, DataType.BYTES, length=10, ignore_invalid=False),
-    ]
-))
-
 # 0704: Device ID
 register_message(MessageDefinition(
     name="device_id",
@@ -271,6 +271,7 @@ register_message(MessageDefinition(
     description="Device identification",
     fields=[],
 ))
+
 
 def list_messages() -> List[str]:
     return [msg.name for msg in THELIA_MESSAGES.values()]

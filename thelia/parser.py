@@ -1,7 +1,6 @@
 """
-Thelia + MiPro parser with all sensors including DHW tank.
-For system boiler with storage cylinder.
-FIXED VERSION: Corrected Byte 5 Mapping for DHW Setpoint.
+Thelia + MiPro parser with all sensors.
+FIXED VERSION: Handles Instant Writes & Renames Internal Cutoff
 """
 
 import logging
@@ -20,10 +19,8 @@ EBUS_ADDRESSES = {
     0xFE: "broadcast",
 }
 
-
 def get_device_name(addr: int) -> str:
     return EBUS_ADDRESSES.get(addr, f"device_{addr:02X}")
-
 
 @dataclass
 class ParsedMessage:
@@ -151,7 +148,7 @@ class TheliaParser:
 class DataAggregator:
     """
     Aggregates sensor values for Thelia Condens + MiPro.
-    FIXED MAPPING: DHW Setpoint is at Byte 5 for MiPro.
+    Updated to handle Instant Writes (B5 12).
     """
 
     def __init__(self, max_age: float = 300.0):
@@ -182,148 +179,90 @@ class DataAggregator:
                 # Type 1: Live Temperatures
                 if resp[0] != 0xFF:
                     flow = resp[0] / 2.0
-                    if 0 < flow < 100:
-                        self._set_sensor("boiler.flow_temperature", round(flow, 1), "°C", ts,
-                                         "Flow temperature (Vorlauf)")
+                    self._set_sensor("boiler.flow_temperature", round(flow, 1), "°C", ts, "Flow temperature")
 
                 if resp[1] != 0xFF:
                     ret = resp[1] / 2.0
-                    if 0 < ret < 100:
-                        self._set_sensor("boiler.return_temperature", round(ret, 1), "°C", ts,
-                                         "Return temperature (Rücklauf)")
+                    self._set_sensor("boiler.return_temperature", round(ret, 1), "°C", ts, "Return temperature")
 
-                # DHW Tank (Storage) Temperature
-                # Byte 2 is often a secondary temp (Outdoor/Tank)
-                if resp[2] != 0xFF:
-                    temp_aux = resp[2] / 2.0
-                    if 10 <= temp_aux <= 85:
-                        self._set_sensor("boiler.storage_temperature_aux", round(temp_aux, 1), "°C", ts,
-                                         "DHW Storage (Aux Sensor)")
-
-                # Byte 5 is the primary Tank temp (from your logs: 0x51 -> 40.5C)
+                # DHW Tank (Try Byte 5 first, then Byte 2)
                 if resp[5] != 0xFF:
-                    dhw_tank = resp[5] / 2.0
-                    if 10 <= dhw_tank <= 85:
-                        self._set_sensor("boiler.dhw_tank_temperature", round(dhw_tank, 1), "°C", ts,
-                                         "DHW Cylinder Temperature")
+                    self._set_sensor("boiler.dhw_tank_temperature", resp[5] / 2.0, "°C", ts, "DHW Cylinder Temp")
+                elif resp[2] != 0xFF:
+                    self._set_sensor("boiler.dhw_tank_temperature", resp[2] / 2.0, "°C", ts, "DHW Cylinder Temp (Aux)")
 
-                # Calculate Delta T
+                # Calc Delta T
                 flow_val = self.get_sensor("boiler.flow_temperature")
                 ret_val = self.get_sensor("boiler.return_temperature")
                 if flow_val and ret_val:
                     delta = flow_val - ret_val
-                    self._set_sensor("boiler.delta_t", round(delta, 1), "°C", ts,
-                                     "Flow - Return Delta")
-                    self._set_sensor("boiler.condensing_possible", ret_val < 55.0, "", ts,
-                                     "Condensing Mode Active")
+                    self._set_sensor("boiler.delta_t", round(delta, 1), "°C", ts, "Flow-Return Delta")
 
             elif query_type == 0 and len(resp) >= 8:
-                # Type 0: Extended status with pressure
+                # Type 0: Status/Pressure
                 if resp[2] != 0xFF:
-                    pressure = resp[2] / 10.0
-                    if 0.1 <= pressure <= 4.0:
-                        self._set_sensor("boiler.water_pressure", round(pressure, 1), "bar", ts,
-                                         "Water Pressure")
+                    self._set_sensor("boiler.water_pressure", resp[2] / 10.0, "bar", ts, "Water Pressure")
 
                 if resp[7] != 0xFF:
                     ext_status = resp[7]
-                    self._set_sensor("boiler.flame_on", bool(ext_status & 0x01), "", ts, "Burner ON")
-                    self._set_sensor("boiler.pump_running", bool(ext_status & 0x02), "", ts, "Pump ON")
+                    self._set_sensor("boiler.flame_on", bool(ext_status & 0x01), "", ts, "Burner Flame")
                     self._set_sensor("boiler.dhw_active", bool(ext_status & 0x04), "", ts, "DHW Mode")
                     self._set_sensor("boiler.heating_active", bool(ext_status & 0x80), "", ts, "Heating Mode")
 
-            elif query_type == 2 and len(resp) >= 6:  # REQUIRED: Check length >= 6 for byte 5
+            elif query_type == 2 and len(resp) >= 6:
                 # Type 2: Setpoints
-                if resp[0] != 0xFF and resp[0] <= 100:
-                    self._set_sensor("boiler.burner_modulation", resp[0], "%", ts,
-                                     "Modulation Level")
+                if resp[0] != 0xFF:
+                    self._set_sensor("boiler.burner_modulation", resp[0], "%", ts, "Modulation")
 
-                # Outdoor cutoff
-                if resp[1] != 0xFF and 5 <= resp[1] <= 30:
-                    self._set_sensor("mipro.outdoor_cutoff", resp[1], "°C", ts,
-                                     "Summer/Winter Threshold")
+                # === UPDATED: Label as Internal so you know it's not MiPro ===
+                if resp[1] != 0xFF:
+                    self._set_sensor("boiler.outdoor_cutoff_internal", resp[1], "°C", ts,
+                                   "Boiler Internal Cutoff (Ignored by MiPro)")
 
-                # Max flow temperature
                 if resp[2] != 0xFF:
-                    max_flow = resp[2] / 2.0
-                    if 40 <= max_flow <= 90:
-                        self._set_sensor("mipro.max_flow_temp", round(max_flow, 1), "°C", ts,
-                                         "Max Flow Limit")
+                    self._set_sensor("mipro.max_flow_temp", resp[2] / 2.0, "°C", ts, "Max Flow Limit")
 
-                # === FIXED: DHW Setpoints ===
-
-                # Byte 3: Boiler Internal/Local Setpoint (0x5A = 45C in your log)
+                # DHW: Local (Boiler) vs Remote (MiPro)
                 if resp[3] != 0xFF:
-                    dhw_local = resp[3] / 2.0
-                    self._set_sensor("boiler.dhw_setpoint_local", round(dhw_local, 1), "°C", ts,
-                                     "DHW Setpoint (Boiler Dial)")
+                    self._set_sensor("boiler.dhw_setpoint_local", resp[3] / 2.0, "°C", ts, "Boiler Dial Setpoint")
 
-                # Byte 5: MiPro Active Setpoint (0x64 = 50C in your log)
+                # This is the correct active setpoint for MiPro
                 if resp[5] != 0xFF:
-                    dhw_sp = resp[5] / 2.0
-                    # Sanity check: 30-75C
-                    if 30 <= dhw_sp <= 75:
-                        self._set_sensor("mipro.dhw_setpoint", round(dhw_sp, 1), "°C", ts,
-                                         "DHW Setpoint (MiPro Active)")
+                    val = resp[5] / 2.0
+                    if 30 <= val <= 75:
+                        self._set_sensor("mipro.dhw_setpoint", val, "°C", ts, "DHW Setpoint (Active)")
 
-        # === B504: Modulation and Outdoor Temperature ===
-        elif msg.name == "modulation_outdoor" and len(resp) >= 4:
-            if resp[0] != 0xFF and resp[0] <= 100:
-                self._set_sensor("boiler.burner_modulation", resp[0], "%", ts, "Modulation Level")
+        # === B512: INSTANT WRITE COMMAND (NEW!) ===
+        # This allows the sensor to update the moment you turn the dial
+        elif msg.name == "param_write" and len(data) >= 2:
+            param_id = data[0]
+            val_raw = data[1]
 
-            # Outdoor temperature
-            # Try 16-bit first
+            # ID 0x00 is DHW Setpoint Write (0x64 = 50C)
+            if param_id == 0x00:
+                dhw_new = val_raw / 2.0
+                if 30 <= dhw_new <= 75:
+                    self._set_sensor("mipro.dhw_setpoint", dhw_new, "°C", ts, "DHW Setpoint (Instant Write)")
+                    print(f"⚡ INSTANT UPDATE: DHW changed to {dhw_new}°C")
+
+        # === B504: Outdoor ===
+        elif msg.name == "modulation_outdoor":
             if len(resp) >= 10:
-                outdoor_raw = int.from_bytes(resp[8:10], 'little', signed=True)
-                if outdoor_raw not in (-1, 32767, -32768):
-                    outdoor = outdoor_raw / 256.0
-                    if -40 <= outdoor <= 50:
-                        self._set_sensor("boiler.outdoor_temperature", round(outdoor, 1), "°C", ts, "Outdoor Temp")
-                        return
-
-            # Fallback to Byte 1 (Data2c) if 16-bit failed or packet short
-            # Your messages.py defines this as 'outdoor_temp_backup'
-            if resp[1] != 0xFF:
-                # Some firmwares send signed byte/2 here
+                val = int.from_bytes(resp[8:10], 'little', signed=True) / 256.0
+                if -40 < val < 50:
+                    self._set_sensor("boiler.outdoor_temperature", round(val, 1), "°C", ts, "Outdoor Temp")
+            elif len(resp) >= 2 and resp[1] != 0xFF:
+                # Fallback for some firmware
                 val = int.from_bytes([resp[1]], 'little', signed=True) / 2.0
-                if -40 <= val <= 50:
-                    self._set_sensor("boiler.outdoor_temperature", round(val, 1), "°C", ts, "Outdoor Temp (Backup)")
+                self._set_sensor("boiler.outdoor_temperature", round(val, 1), "°C", ts, "Outdoor Temp (Backup)")
 
-        # === B509: Room Temperature ===
+        # === B509: Room Temp ===
         elif msg.name == "room_temp" and len(data) >= 2:
             if data[0] != 0xFF:
-                room = data[0] / 2.0
-                if 5 <= room <= 40:
-                    self._set_sensor("mipro.room_temperature", round(room, 1), "°C", ts, "Room Temp")
-
-            if data[1] != 0xFF and data[1] != 0x7F:
-                adj = int.from_bytes([data[1]], 'little', signed=True)
-                if -10 <= adj <= 10:
-                    self._set_sensor("mipro.room_setpoint_adjust", adj, "", ts, "Room Adjust")
-
-        # === B516: DateTime ===
-        elif msg.name == "datetime" and len(data) >= 8:
-            flags = data[0]
-            if flags == 0:
-                def bcd(b):
-                    return ((b >> 4) & 0xF) * 10 + (b & 0xF)
-
-                try:
-                    h, m, s = bcd(data[3]), bcd(data[2]), bcd(data[1])
-                    if h < 24 and m < 60:
-                        self._set_sensor("mipro.time", f"{h:02d}:{m:02d}:{s:02d}", "", ts)
-                except:
-                    pass
-
-                try:
-                    D, M, Y = bcd(data[4]), bcd(data[5]), bcd(data[7])
-                    if 1 <= M <= 12 and 1 <= D <= 31:
-                        self._set_sensor("mipro.date", f"20{Y:02d}-{M:02d}-{D:02d}", "", ts)
-                except:
-                    pass
+                self._set_sensor("mipro.room_temperature", data[0] / 2.0, "°C", ts, "Room Temperature")
 
     def _set_sensor(self, name: str, value: Any, unit: str,
-                    timestamp: datetime, description: str = "") -> None:
+                   timestamp: datetime, description: str = "") -> None:
         self._sensors[name] = {
             "value": value,
             "unit": unit,
@@ -357,7 +296,7 @@ class DataAggregator:
     def print_status(self) -> None:
         sensors = self.get_all_sensors()
         print("\n" + "=" * 70)
-        print("📊 HEATING SYSTEM STATUS (MiPro Corrected)")
+        print("📊 HEATING SYSTEM STATUS (Corrected)")
         print("=" * 70)
 
         boiler = {k.replace("boiler.", ""): v for k, v in sensors.items() if k.startswith("boiler.")}
@@ -378,8 +317,6 @@ class DataAggregator:
         val = data["value"]
         unit = data["unit"]
         desc = data.get("description", "")
-        if isinstance(val, bool):
-            val_str = "✅ YES" if val else "❌ NO"
-        else:
-            val_str = f"{val}{unit}"
+        if isinstance(val, bool): val_str = "✅ YES" if val else "❌ NO"
+        else: val_str = f"{val}{unit}"
         print(f"   {name:25s}: {val_str:10s} | {desc}")
