@@ -1,6 +1,6 @@
 """
 Thelia Condens + MiPro Controller message definitions.
-With proper handling of 0xFF = not available.
+FIXED VERSION: Corrects B504 Outdoor Temp offset and includes all necessary bytes.
 """
 
 from dataclasses import dataclass, field
@@ -88,7 +88,7 @@ class FieldDefinition:
                 value = round(raw / 2.0, 1)
 
             elif self.data_type == DataType.TEMP16:
-                # Signed 16-bit / 256 for precise temps
+                # Signed 16-bit / 256 for precise temps (Used in B504)
                 if self.offset + 2 > len(data):
                     return None
                 raw = int.from_bytes(data[self.offset:self.offset+2], 'little', signed=True)
@@ -162,6 +162,7 @@ def get_message_definition(primary: int, secondary: int) -> Optional[MessageDefi
 # ============================================
 
 # B511: Status/Temperature Query (Polymorphic)
+# We capture generic bytes here because the meaning changes based on Query Type (0, 1, 2)
 register_message(MessageDefinition(
     name="status_temps",
     primary_command=0xB5,
@@ -174,16 +175,17 @@ register_message(MessageDefinition(
         FieldDefinition("byte0", 0, DataType.UINT8, ignore_invalid=False),
         FieldDefinition("byte1", 1, DataType.UINT8, ignore_invalid=False),
         FieldDefinition("byte2", 2, DataType.UINT8, ignore_invalid=False),
-        FieldDefinition("byte3", 3, DataType.UINT8, ignore_invalid=False),
-        FieldDefinition("byte4", 4, DataType.UINT8, ignore_invalid=False),
+        FieldDefinition("byte3", 3, DataType.UINT8, ignore_invalid=False), # Room Temp (Type 0)
+        FieldDefinition("byte4", 4, DataType.UINT8, ignore_invalid=False), # Pump State (Type 0)
         FieldDefinition("byte5", 5, DataType.UINT8, ignore_invalid=False),
         FieldDefinition("byte6", 6, DataType.UINT8, ignore_invalid=False),
-        FieldDefinition("byte7", 7, DataType.UINT8, ignore_invalid=False),
+        FieldDefinition("byte7", 7, DataType.UINT8, ignore_invalid=False), # Burner Flags (Type 0)
         FieldDefinition("byte8", 8, DataType.UINT8, ignore_invalid=False),
     ]
 ))
 
 # B504: Modulation and Outdoor Temperature
+# UPDATED: Extended to capture Byte 8/9 for Outdoor Temp
 register_message(MessageDefinition(
     name="modulation_outdoor",
     primary_command=0xB5,
@@ -194,9 +196,16 @@ register_message(MessageDefinition(
     ],
     response_fields=[
         FieldDefinition("modulation", 0, DataType.UINT8, unit="%"),
-        FieldDefinition("outdoor_temp_raw", 1, DataType.INT16_LE),
-        FieldDefinition("outdoor_temp_backup", 1, DataType.DATA1B),
-        FieldDefinition("byte3", 3, DataType.UINT8, ignore_invalid=False),
+        # Fillers (Bytes 1-7 are usually 0xFF or invalid)
+        FieldDefinition("byte1", 1, DataType.UINT8),
+        FieldDefinition("byte2", 2, DataType.UINT8),
+        FieldDefinition("byte3", 3, DataType.UINT8),
+        FieldDefinition("byte4", 4, DataType.UINT8),
+        FieldDefinition("byte5", 5, DataType.UINT8),
+        FieldDefinition("byte6", 6, DataType.UINT8),
+        FieldDefinition("byte7", 7, DataType.UINT8),
+        # The Real Outdoor Temp (Bytes 8-9) - Signed Int16 / 256
+        FieldDefinition("outdoor_temp", 8, DataType.TEMP16, unit="°C"),
     ]
 ))
 
