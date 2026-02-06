@@ -7,8 +7,8 @@ import os
 # Configuration - CHANGE THESE TO MATCH YOUR HOME ASSISTANT
 MQTT_BROKER = "192.168.1.84"  # <--- Change IP
 MQTT_PORT = 1883
-MQTT_USER = "none"  # <--- Change User (or None)
-MQTT_PASS = "none"  # <--- Change Pass (or None)
+MQTT_USER = None  # <--- Change User (or None)
+MQTT_PASS = None  # <--- Change Pass (or None)
 SERIAL_PORT = "/dev/ttyAMA0"
 
 # Setup logging
