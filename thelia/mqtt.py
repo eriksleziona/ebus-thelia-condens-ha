@@ -8,7 +8,9 @@ import paho.mqtt.client as mqtt
 class HAMqttClient:
     def __init__(self, broker: str, port: int, username: str = None, password: str = None):
         self.logger = logging.getLogger("MQTT")
-        self.client = mqtt.Client("ebus_thelia_bridge")
+
+        # FIX for paho-mqtt 2.0: Define Callback API Version
+        self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, "ebus_thelia_bridge")
 
         if username and password:
             self.client.username_pw_set(username, password)
@@ -19,13 +21,12 @@ class HAMqttClient:
         self.discovery_sent = False
 
         # Define Home Assistant Entity Configurations
-        # This maps your internal keys to HA UI settings
         self.entity_map = {
             "boiler.flow_temperature": {
                 "name": "Boiler Flow Temperature",
                 "class": "temperature",
                 "icon": "mdi:thermometer-chevron-up",
-                "state_class": "measurement"  # Enables Charts
+                "state_class": "measurement"
             },
             "boiler.return_temperature": {
                 "name": "Boiler Return Temperature",
@@ -106,7 +107,8 @@ class HAMqttClient:
         except Exception as e:
             self.logger.error(f"Failed to connect to MQTT: {e}")
 
-    def _on_connect(self, client, userdata, flags, rc):
+    # FIX for paho-mqtt 2.0: Added 'properties' argument
+    def _on_connect(self, client, userdata, flags, rc, properties=None):
         if rc == 0:
             self.logger.info("✅ Connected to MQTT Broker!")
             self.connected = True
