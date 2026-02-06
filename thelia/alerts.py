@@ -5,57 +5,116 @@ Checks sensor values against defined thresholds.
 
 import logging
 import time
-from typing import Dict, List, Callable, Optional
-from dataclasses import dataclass
+from typing import Dict, List, Callable, Optional, Any
+from dataclasses import dataclass, field
+from enum import Enum, auto
+
+
+# ==========================================
+# 1. Define the missing Types and Enums
+# ==========================================
+
+class AlertSeverity(Enum):
+    INFO = "INFO"
+    WARNING = "WARNING"
+    CRITICAL = "CRITICAL"
+
+
+class AlertType(Enum):
+    PRESSURE = "pressure"
+    TEMPERATURE = "temperature"
+    SYSTEM = "system"
+    COMMUNICATION = "communication"
+
+
+@dataclass
+class AlertThreshold:
+    """Defines a rule for triggering an alert."""
+    sensor: str
+    min_value: Optional[float] = None
+    max_value: Optional[float] = None
+    severity: AlertSeverity = AlertSeverity.WARNING
+    alert_type: AlertType = AlertType.SYSTEM
+    message: str = "Alert triggered"
+    condition: Optional[Callable[[Any], bool]] = None
 
 
 @dataclass
 class Alert:
-    level: str  # "WARNING", "INFO", "CRITICAL"
+    """The actual alert instance generated when a rule is broken."""
+    severity: AlertSeverity
+    alert_type: AlertType
     message: str
     sensor: str
-    value: float
+    value: Any
     timestamp: float
 
+    def __str__(self):
+        icon = "ℹ️"
+        if self.severity == AlertSeverity.WARNING:
+            icon = "⚠️"
+        elif self.severity == AlertSeverity.CRITICAL:
+            icon = "🚨"
+        return f"{icon} [{self.severity.value}] {self.message} (Value: {self.value})"
+
+
+# ==========================================
+# 2. The Alert Manager
+# ==========================================
 
 class AlertManager:
     def __init__(self):
         self.logger = logging.getLogger(self.__class__.__name__)
         self._callbacks: List[Callable[[Alert], None]] = []
         self._active_alerts: Dict[str, Alert] = {}
+        self.rules: List[AlertThreshold] = []
 
-        # Define thresholds matching your live_test.py description
+        # Load default rules matching your live_test requirements
+        self._load_default_rules()
+
+    def _load_default_rules(self):
+        """Define the logic for Pressure, Delta T, etc."""
         self.rules = [
-            {
-                "sensor": "boiler.water_pressure",
-                "condition": lambda v: v < 0.8,
-                "level": "CRITICAL",
-                "msg": "⚠️ Low water pressure (< 0.8 bar)"
-            },
-            {
-                "sensor": "boiler.water_pressure",
-                "condition": lambda v: v > 2.5,
-                "level": "WARNING",
-                "msg": "⚠️ High water pressure (> 2.5 bar)"
-            },
-            {
-                "sensor": "boiler.return_temperature",
-                "condition": lambda v: v > 55.0,
-                "level": "INFO",
-                "msg": "ℹ️ Return temp high - Condensing inefficient (> 55°C)"
-            },
-            {
-                "sensor": "boiler.delta_t",
-                "condition": lambda v: v > 20.0,
-                "level": "WARNING",
-                "msg": "⚠️ High ΔT Flow/Return (> 20°C)"
-            },
-            {
-                "sensor": "boiler.flow_temperature",
-                "condition": lambda v: v > 80.0,
-                "level": "WARNING",
-                "msg": "⚠️ High Flow Temperature (> 80°C)"
-            }
+            # Low Pressure (< 0.8 bar)
+            AlertThreshold(
+                sensor="boiler.water_pressure",
+                min_value=0.8,
+                severity=AlertSeverity.CRITICAL,
+                alert_type=AlertType.PRESSURE,
+                message="Low water pressure"
+            ),
+            # High Pressure (> 2.5 bar)
+            AlertThreshold(
+                sensor="boiler.water_pressure",
+                max_value=2.5,
+                severity=AlertSeverity.WARNING,
+                alert_type=AlertType.PRESSURE,
+                message="High water pressure"
+            ),
+            # Condensing Inefficiency (Return > 55°C)
+            AlertThreshold(
+                sensor="boiler.return_temperature",
+                max_value=55.0,
+                severity=AlertSeverity.INFO,
+                alert_type=AlertType.TEMPERATURE,
+                message="Return temp high - Condensing inefficient"
+            ),
+            # High Delta T (> 20°C)
+            AlertThreshold(
+                sensor="boiler.delta_t",
+                max_value=20.0,
+                severity=AlertSeverity.WARNING,
+                alert_type=AlertType.TEMPERATURE,
+                message="High ΔT Flow/Return"
+            ),
+            # High Flow Temp (> 80°C)
+            AlertThreshold(
+                sensor="boiler.flow_temperature",
+                max_value=80.0,
+                severity=AlertSeverity.WARNING,
+                alert_type=AlertType.TEMPERATURE,
+                message="High Flow Temperature"
+            )
         ]
 
     def register_callback(self, callback: Callable[[Alert], None]) -> None:
@@ -75,46 +134,51 @@ class AlertManager:
         current_time = time.time()
 
         for rule in self.rules:
-            sensor_name = rule["sensor"]
-
             # Skip if sensor data not available
-            if sensor_name not in sensors:
+            if rule.sensor not in sensors:
                 continue
 
-            sensor_data = sensors[sensor_name]
+            sensor_data = sensors[rule.sensor]
             value = sensor_data["value"]
 
             # Skip if data is too old (e.g., > 5 minutes)
             if sensor_data.get("age_seconds", 0) > 300:
                 continue
 
-            # Check the condition
+            # Check logic
             is_triggered = False
             try:
                 if isinstance(value, (int, float)):
-                    is_triggered = rule["condition"](value)
+                    if rule.min_value is not None and value < rule.min_value:
+                        is_triggered = True
+                    if rule.max_value is not None and value > rule.max_value:
+                        is_triggered = True
+                    if rule.condition and rule.condition(value):
+                        is_triggered = True
             except Exception:
                 continue
 
-            alert_key = f"{sensor_name}_{rule['level']}"
+            # Create a unique key for this specific alert rule
+            # e.g. "boiler.water_pressure_CRITICAL"
+            alert_key = f"{rule.sensor}_{rule.severity.name}_{rule.alert_type.name}"
 
             if is_triggered:
-                # If this is a new alert (not currently active)
+                # Only notify if this is a NEW alert
                 if alert_key not in self._active_alerts:
                     alert = Alert(
-                        level=rule["level"],
-                        message=rule["msg"],
-                        sensor=sensor_name,
+                        severity=rule.severity,
+                        alert_type=rule.alert_type,
+                        message=rule.message,
+                        sensor=rule.sensor,
                         value=value,
                         timestamp=current_time
                     )
                     self._active_alerts[alert_key] = alert
                     self._notify(alert)
             else:
-                # If alert was active but condition is now cleared, remove it
+                # Clear alert if condition is resolved
                 if alert_key in self._active_alerts:
                     del self._active_alerts[alert_key]
-                    # Optional: Notify "Resolved" if you wanted to add that logic here
 
     def check_sensor_staleness(self, sensors: Dict[str, Dict]) -> None:
         """
@@ -125,21 +189,21 @@ class AlertManager:
         for name in critical_sensors:
             if name in sensors:
                 age = sensors[name]["age_seconds"]
+                key = f"{name}_stale"
+
                 if age > 600:  # 10 minutes
-                    key = f"{name}_stale"
                     if key not in self._active_alerts:
                         alert = Alert(
-                            level="WARNING",
-                            message=f"⚠️ Sensor data stale: {name}",
+                            severity=AlertSeverity.WARNING,
+                            alert_type=AlertType.COMMUNICATION,
+                            message=f"Sensor data stale (>10m)",
                             sensor=name,
-                            value=age,
+                            value=f"{age:.0f}s",
                             timestamp=time.time()
                         )
                         self._active_alerts[key] = alert
                         self._notify(alert)
                 else:
-                    # Clear stale alert if data is fresh again
-                    key = f"{name}_stale"
                     if key in self._active_alerts:
                         del self._active_alerts[key]
 
@@ -148,9 +212,9 @@ class AlertManager:
             print("\n✅ No active alerts.")
             return
 
-        print("\n" + "!" * 40)
+        print("\n" + "!" * 50)
         print(f"🚨 ACTIVE ALERTS ({len(self._active_alerts)})")
-        print("!" * 40)
+        print("!" * 50)
         for alert in self._active_alerts.values():
-            print(f"   • [{alert.level}] {alert.message} (Value: {alert.value})")
+            print(f"   {alert}")
         print("\n")
