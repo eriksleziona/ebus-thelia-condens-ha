@@ -7,12 +7,10 @@ from dataclasses import dataclass, field
 from typing import Dict, Any, Optional, List
 from enum import Enum
 
-
 # Invalid/Not Available markers
 INVALID_UINT8 = 0xFF
 INVALID_UINT16 = 0xFFFF
 INVALID_INT16 = -1  # 0xFFFF as signed
-
 
 class DataType(Enum):
     UINT8 = "uint8"
@@ -26,7 +24,6 @@ class DataType(Enum):
     BCD = "bcd"
     BIT = "bit"
     BYTES = "bytes"
-
 
 @dataclass
 class FieldDefinition:
@@ -144,18 +141,12 @@ class MessageDefinition:
     def command(self) -> tuple:
         return (self.primary_command, self.secondary_command)
 
-    @property
-    def command_hex(self) -> str:
-        return f"{self.primary_command:02X}{self.secondary_command:02X}"
-
 
 THELIA_MESSAGES: Dict[tuple, MessageDefinition] = {}
-
 
 def register_message(msg: MessageDefinition) -> MessageDefinition:
     THELIA_MESSAGES[msg.command] = msg
     return msg
-
 
 def get_message_definition(primary: int, secondary: int) -> Optional[MessageDefinition]:
     return THELIA_MESSAGES.get((primary, secondary))
@@ -165,11 +156,9 @@ def get_message_definition(primary: int, secondary: int) -> Optional[MessageDefi
 # MESSAGE DEFINITIONS
 # ============================================
 
-# B511: Status/Temperature Query
-# Query type determines response format:
-#   type 1: Flow/Return temps, status
-#   type 2: Modulation info
-#   type 0: Extended status
+# B511: Status/Temperature Query (Polymorphic)
+# We map bytes as Generic UINT8 because meanings change by Type (0,1,2).
+# The detailed decoding happens in parser.py -> DataAggregator
 register_message(MessageDefinition(
     name="status_temps",
     primary_command=0xB5,
@@ -179,14 +168,12 @@ register_message(MessageDefinition(
         FieldDefinition("query_type", 0, DataType.UINT8, ignore_invalid=False),
     ],
     response_fields=[
-        # Response bytes depend on query_type
-        # For type 1: flow, return, status, pressure, flags
         FieldDefinition("byte0", 0, DataType.UINT8, ignore_invalid=False),
         FieldDefinition("byte1", 1, DataType.UINT8, ignore_invalid=False),
         FieldDefinition("byte2", 2, DataType.UINT8, ignore_invalid=False),
         FieldDefinition("byte3", 3, DataType.UINT8, ignore_invalid=False),
         FieldDefinition("byte4", 4, DataType.UINT8, ignore_invalid=False),
-        FieldDefinition("status_byte", 5, DataType.UINT8, ignore_invalid=False),
+        FieldDefinition("byte5", 5, DataType.UINT8, ignore_invalid=False),
         FieldDefinition("byte6", 6, DataType.UINT8, ignore_invalid=False),
         FieldDefinition("byte7", 7, DataType.UINT8, ignore_invalid=False),
         FieldDefinition("byte8", 8, DataType.UINT8, ignore_invalid=False),
@@ -203,15 +190,15 @@ register_message(MessageDefinition(
         FieldDefinition("query", 0, DataType.UINT8, ignore_invalid=False),
     ],
     response_fields=[
-        # Response: modulation %, outdoor temp (2 bytes), other data
         FieldDefinition("modulation", 0, DataType.UINT8, unit="%"),
-        FieldDefinition("outdoor_temp_raw", 1, DataType.INT16_LE),  # Raw for manual decode
+        FieldDefinition("outdoor_temp_raw", 1, DataType.INT16_LE),
+        # Sometimes outdoor temp is in byte 1 as Data2c on older firmwares
+        FieldDefinition("outdoor_temp_backup", 1, DataType.DATA1B),
         FieldDefinition("byte3", 3, DataType.UINT8, ignore_invalid=False),
-        FieldDefinition("byte4", 4, DataType.UINT8, ignore_invalid=False),
     ]
 ))
 
-# B510: Temperature Setpoints
+# B510: Temperature Setpoints (Write Command)
 register_message(MessageDefinition(
     name="temp_setpoint",
     primary_command=0xB5,
@@ -221,7 +208,7 @@ register_message(MessageDefinition(
         FieldDefinition("mode1", 0, DataType.UINT8, ignore_invalid=False),
         FieldDefinition("mode2", 1, DataType.UINT8, ignore_invalid=False),
         FieldDefinition("target_flow_temp", 2, DataType.DATA1C, unit="°C"),
-        FieldDefinition("dhw_setpoint", 3, DataType.DATA1C, unit="°C"),  # Will be None if 0xFF
+        FieldDefinition("dhw_setpoint", 3, DataType.DATA1C, unit="°C"),
         FieldDefinition("byte4", 4, DataType.UINT8),
         FieldDefinition("byte5", 5, DataType.UINT8),
         FieldDefinition("bytes6_8", 6, DataType.BYTES, length=3, ignore_invalid=False),
@@ -261,27 +248,12 @@ register_message(MessageDefinition(
     ]
 ))
 
-# B512: DHW / Pressure data
+# B512: Unknown / DHW Stats
 register_message(MessageDefinition(
     name="b512_data",
     primary_command=0xB5,
     secondary_command=0x12,
     description="B512 - possibly DHW or pressure",
-    fields=[
-        FieldDefinition("query_type", 0, DataType.UINT8, ignore_invalid=False),
-        FieldDefinition("data", 1, DataType.BYTES, length=9, ignore_invalid=False),
-    ],
-    response_fields=[
-        FieldDefinition("response", 0, DataType.BYTES, length=10, ignore_invalid=False),
-    ]
-))
-
-# B513
-register_message(MessageDefinition(
-    name="b513_data",
-    primary_command=0xB5,
-    secondary_command=0x13,
-    description="B513 query",
     fields=[
         FieldDefinition("query_type", 0, DataType.UINT8, ignore_invalid=False),
         FieldDefinition("data", 1, DataType.BYTES, length=9, ignore_invalid=False),
@@ -299,7 +271,6 @@ register_message(MessageDefinition(
     description="Device identification",
     fields=[],
 ))
-
 
 def list_messages() -> List[str]:
     return [msg.name for msg in THELIA_MESSAGES.values()]

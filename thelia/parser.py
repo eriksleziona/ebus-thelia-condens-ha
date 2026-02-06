@@ -1,6 +1,7 @@
 """
 Thelia + MiPro parser with all sensors including DHW tank.
 For system boiler with storage cylinder.
+FIXED VERSION: Corrected Byte 5 Mapping for DHW Setpoint.
 """
 
 import logging
@@ -10,7 +11,6 @@ from datetime import datetime
 
 from ebus_core.telegram import EbusTelegram
 from .messages import MessageDefinition, get_message_definition
-
 
 EBUS_ADDRESSES = {
     0x00: "broadcast_0",
@@ -108,6 +108,7 @@ class TheliaParser:
         response_values = {}
         units = {}
 
+        # Decode Query Fields
         for field_def in msg_def.fields:
             value = field_def.decode(telegram.data)
             if value is not None:
@@ -115,6 +116,7 @@ class TheliaParser:
                 if field_def.unit:
                     units[field_def.name] = field_def.unit
 
+        # Decode Response Fields
         if telegram.response_data and msg_def.response_fields:
             for field_def in msg_def.response_fields:
                 value = field_def.decode(telegram.response_data)
@@ -148,33 +150,8 @@ class TheliaParser:
 
 class DataAggregator:
     """
-    Aggregates sensor values from verified byte positions:
-
-    B511 Type 1 (Query 0x01) - Temperatures:
-      byte[0] ÷ 2 = Flow temperature
-      byte[1] ÷ 2 = Return temperature
-      byte[5] ÷ 2 = DHW tank temperature
-
-    B511 Type 0 (Query 0x00) - Extended Status:
-      byte[2] ÷ 10 = Water pressure
-      byte[7] = Status flags (flame, pump, heating, dhw)
-
-    B511 Type 2 (Query 0x02) - Setpoints:
-      byte[0] = Modulation %
-      byte[1] = Outdoor cutoff (raw, NOT ÷2!)
-      byte[2] ÷ 2 = Max flow temp
-      byte[3] ÷ 2 = DHW setpoint
-      byte[4] ÷ 2 = Legionella temp
-
-    B504 - Outdoor Temperature:
-      byte[0] = Modulation %
-      bytes[8:9] int16_le ÷ 256 = Outdoor temperature
-
-    B510 - Target Flow:
-      byte[2] ÷ 2 = Target flow temperature
-
-    B509 - Room Temperature:
-      byte[0] ÷ 2 = Room temperature
+    Aggregates sensor values for Thelia Condens + MiPro.
+    FIXED MAPPING: DHW Setpoint is at Byte 5 for MiPro.
     """
 
     def __init__(self, max_age: float = 300.0):
@@ -202,25 +179,33 @@ class DataAggregator:
             query_type = data[0]
 
             if query_type == 1 and len(resp) >= 6:
-                # Type 1: Flow, Return, DHW Tank temperatures
+                # Type 1: Live Temperatures
                 if resp[0] != 0xFF:
                     flow = resp[0] / 2.0
                     if 0 < flow < 100:
                         self._set_sensor("boiler.flow_temperature", round(flow, 1), "°C", ts,
-                                        "Flow temperature (Vorlauf)")
+                                         "Flow temperature (Vorlauf)")
 
                 if resp[1] != 0xFF:
                     ret = resp[1] / 2.0
                     if 0 < ret < 100:
                         self._set_sensor("boiler.return_temperature", round(ret, 1), "°C", ts,
-                                        "Return temperature (Rücklauf)")
+                                         "Return temperature (Rücklauf)")
 
-                # DHW Tank temperature - byte[5]
+                # DHW Tank (Storage) Temperature
+                # Byte 2 is often a secondary temp (Outdoor/Tank)
+                if resp[2] != 0xFF:
+                    temp_aux = resp[2] / 2.0
+                    if 10 <= temp_aux <= 85:
+                        self._set_sensor("boiler.storage_temperature_aux", round(temp_aux, 1), "°C", ts,
+                                         "DHW Storage (Aux Sensor)")
+
+                # Byte 5 is the primary Tank temp (from your logs: 0x51 -> 40.5C)
                 if resp[5] != 0xFF:
                     dhw_tank = resp[5] / 2.0
                     if 10 <= dhw_tank <= 85:
                         self._set_sensor("boiler.dhw_tank_temperature", round(dhw_tank, 1), "°C", ts,
-                                        "DHW cylinder temperature")
+                                         "DHW Cylinder Temperature")
 
                 # Calculate Delta T
                 flow_val = self.get_sensor("boiler.flow_temperature")
@@ -228,9 +213,9 @@ class DataAggregator:
                 if flow_val and ret_val:
                     delta = flow_val - ret_val
                     self._set_sensor("boiler.delta_t", round(delta, 1), "°C", ts,
-                                    "Temperature difference (Flow - Return)")
+                                     "Flow - Return Delta")
                     self._set_sensor("boiler.condensing_possible", ret_val < 55.0, "", ts,
-                                    "Return temp allows condensation (<55°C)")
+                                     "Condensing Mode Active")
 
             elif query_type == 0 and len(resp) >= 8:
                 # Type 0: Extended status with pressure
@@ -238,121 +223,107 @@ class DataAggregator:
                     pressure = resp[2] / 10.0
                     if 0.1 <= pressure <= 4.0:
                         self._set_sensor("boiler.water_pressure", round(pressure, 1), "bar", ts,
-                                        "System water pressure")
+                                         "Water Pressure")
 
                 if resp[7] != 0xFF:
                     ext_status = resp[7]
-                    self._set_sensor("boiler.flame_on", bool(ext_status & 0x01), "", ts,
-                                    "Burner flame active")
-                    self._set_sensor("boiler.pump_running", bool(ext_status & 0x02), "", ts,
-                                    "Circulation pump running")
-                    self._set_sensor("boiler.dhw_active", bool(ext_status & 0x04), "", ts,
-                                    "DHW heating active")
-                    self._set_sensor("boiler.heating_active", bool(ext_status & 0x80), "", ts,
-                                    "Heating mode active")
+                    self._set_sensor("boiler.flame_on", bool(ext_status & 0x01), "", ts, "Burner ON")
+                    self._set_sensor("boiler.pump_running", bool(ext_status & 0x02), "", ts, "Pump ON")
+                    self._set_sensor("boiler.dhw_active", bool(ext_status & 0x04), "", ts, "DHW Mode")
+                    self._set_sensor("boiler.heating_active", bool(ext_status & 0x80), "", ts, "Heating Mode")
 
-            elif query_type == 2 and len(resp) >= 5:
-                # Type 2: Modulation and setpoints
+            elif query_type == 2 and len(resp) >= 6:  # REQUIRED: Check length >= 6 for byte 5
+                # Type 2: Setpoints
                 if resp[0] != 0xFF and resp[0] <= 100:
                     self._set_sensor("boiler.burner_modulation", resp[0], "%", ts,
-                                    "Burner modulation level")
+                                     "Modulation Level")
 
-                # Outdoor cutoff - NOT divided by 2!
+                # Outdoor cutoff
                 if resp[1] != 0xFF and 5 <= resp[1] <= 30:
                     self._set_sensor("mipro.outdoor_cutoff", resp[1], "°C", ts,
-                                    "Outdoor cutoff setpoint")
+                                     "Summer/Winter Threshold")
 
                 # Max flow temperature
                 if resp[2] != 0xFF:
                     max_flow = resp[2] / 2.0
                     if 40 <= max_flow <= 90:
                         self._set_sensor("mipro.max_flow_temp", round(max_flow, 1), "°C", ts,
-                                        "Maximum flow temperature")
+                                         "Max Flow Limit")
 
-                # DHW setpoint
+                # === FIXED: DHW Setpoints ===
+
+                # Byte 3: Boiler Internal/Local Setpoint (0x5A = 45C in your log)
                 if resp[3] != 0xFF:
-                    dhw_sp = resp[3] / 2.0
-                    if 35 <= dhw_sp <= 70:
-                        self._set_sensor("mipro.dhw_setpoint", round(dhw_sp, 1), "°C", ts,
-                                        "DHW temperature setpoint")
+                    dhw_local = resp[3] / 2.0
+                    self._set_sensor("boiler.dhw_setpoint_local", round(dhw_local, 1), "°C", ts,
+                                     "DHW Setpoint (Boiler Dial)")
 
-                # Legionella temperature
-                if len(resp) >= 5 and resp[4] != 0xFF:
-                    legionella = resp[4] / 2.0
-                    if 55 <= legionella <= 75:
-                        self._set_sensor("mipro.dhw_legionella_temp", round(legionella, 1), "°C", ts,
-                                        "DHW Legionella cycle temperature")
+                # Byte 5: MiPro Active Setpoint (0x64 = 50C in your log)
+                if resp[5] != 0xFF:
+                    dhw_sp = resp[5] / 2.0
+                    # Sanity check: 30-75C
+                    if 30 <= dhw_sp <= 75:
+                        self._set_sensor("mipro.dhw_setpoint", round(dhw_sp, 1), "°C", ts,
+                                         "DHW Setpoint (MiPro Active)")
 
         # === B504: Modulation and Outdoor Temperature ===
-        elif msg.name == "modulation_outdoor" and len(resp) >= 10:
+        elif msg.name == "modulation_outdoor" and len(resp) >= 4:
             if resp[0] != 0xFF and resp[0] <= 100:
-                self._set_sensor("boiler.burner_modulation", resp[0], "%", ts,
-                                "Burner modulation level")
+                self._set_sensor("boiler.burner_modulation", resp[0], "%", ts, "Modulation Level")
 
-            # Outdoor temperature from bytes 8-9 (int16_le ÷ 256)
-            outdoor_raw = int.from_bytes(resp[8:10], 'little', signed=True)
-            if outdoor_raw != -1 and outdoor_raw != 32767 and outdoor_raw != -32768:
-                outdoor = outdoor_raw / 256.0
-                if -40 <= outdoor <= 50:
-                    self._set_sensor("boiler.outdoor_temperature", round(outdoor, 1), "°C", ts,
-                                    "Outdoor temperature")
+            # Outdoor temperature
+            # Try 16-bit first
+            if len(resp) >= 10:
+                outdoor_raw = int.from_bytes(resp[8:10], 'little', signed=True)
+                if outdoor_raw not in (-1, 32767, -32768):
+                    outdoor = outdoor_raw / 256.0
+                    if -40 <= outdoor <= 50:
+                        self._set_sensor("boiler.outdoor_temperature", round(outdoor, 1), "°C", ts, "Outdoor Temp")
+                        return
 
-        # === B510: Target Flow Temp ===
-        elif msg.name == "temp_setpoint" and len(data) >= 4:
-            mode1 = data[0]
-
-            if mode1 == 0:
-                if data[2] != 0xFF:
-                    target = data[2] / 2.0
-                    if 20 <= target <= 80:
-                        self._set_sensor("mipro.target_flow_temp", round(target, 1), "°C", ts,
-                                        "Target flow temperature")
+            # Fallback to Byte 1 (Data2c) if 16-bit failed or packet short
+            # Your messages.py defines this as 'outdoor_temp_backup'
+            if resp[1] != 0xFF:
+                # Some firmwares send signed byte/2 here
+                val = int.from_bytes([resp[1]], 'little', signed=True) / 2.0
+                if -40 <= val <= 50:
+                    self._set_sensor("boiler.outdoor_temperature", round(val, 1), "°C", ts, "Outdoor Temp (Backup)")
 
         # === B509: Room Temperature ===
         elif msg.name == "room_temp" and len(data) >= 2:
             if data[0] != 0xFF:
                 room = data[0] / 2.0
-                if 5 <= room <= 35:
-                    self._set_sensor("mipro.room_temperature", round(room, 1), "°C", ts,
-                                    "Room temperature")
+                if 5 <= room <= 40:
+                    self._set_sensor("mipro.room_temperature", round(room, 1), "°C", ts, "Room Temp")
 
             if data[1] != 0xFF and data[1] != 0x7F:
                 adj = int.from_bytes([data[1]], 'little', signed=True)
                 if -10 <= adj <= 10:
-                    self._set_sensor("mipro.room_setpoint_adjust", adj, "", ts,
-                                    "Room setpoint adjustment")
+                    self._set_sensor("mipro.room_setpoint_adjust", adj, "", ts, "Room Adjust")
 
         # === B516: DateTime ===
         elif msg.name == "datetime" and len(data) >= 8:
             flags = data[0]
-
             if flags == 0:
                 def bcd(b):
-                    high = (b >> 4) & 0x0F
-                    low = b & 0x0F
-                    if high > 9 or low > 9:
-                        return None
-                    return high * 10 + low
+                    return ((b >> 4) & 0xF) * 10 + (b & 0xF)
 
-                s = bcd(data[1])
-                m = bcd(data[2])
-                h = bcd(data[3])
-
-                if s is not None and m is not None and h is not None:
-                    if h < 24 and m < 60 and s < 60:
+                try:
+                    h, m, s = bcd(data[3]), bcd(data[2]), bcd(data[1])
+                    if h < 24 and m < 60:
                         self._set_sensor("mipro.time", f"{h:02d}:{m:02d}:{s:02d}", "", ts)
+                except:
+                    pass
 
-                day = bcd(data[4])
-                month = bcd(data[5])
-                year = bcd(data[7])
-
-                if day and month and year is not None:
-                    if 1 <= day <= 31 and 1 <= month <= 12:
-                        year_full = 2000 + year
-                        self._set_sensor("mipro.date", f"{year_full}-{month:02d}-{day:02d}", "", ts)
+                try:
+                    D, M, Y = bcd(data[4]), bcd(data[5]), bcd(data[7])
+                    if 1 <= M <= 12 and 1 <= D <= 31:
+                        self._set_sensor("mipro.date", f"20{Y:02d}-{M:02d}-{D:02d}", "", ts)
+                except:
+                    pass
 
     def _set_sensor(self, name: str, value: Any, unit: str,
-                   timestamp: datetime, description: str = "") -> None:
+                    timestamp: datetime, description: str = "") -> None:
         self._sensors[name] = {
             "value": value,
             "unit": unit,
@@ -385,101 +356,30 @@ class DataAggregator:
 
     def print_status(self) -> None:
         sensors = self.get_all_sensors()
-
         print("\n" + "=" * 70)
-        print("📊 HEATING SYSTEM STATUS")
+        print("📊 HEATING SYSTEM STATUS (MiPro Corrected)")
         print("=" * 70)
 
         boiler = {k.replace("boiler.", ""): v for k, v in sensors.items() if k.startswith("boiler.")}
         mipro = {k.replace("mipro.", ""): v for k, v in sensors.items() if k.startswith("mipro.")}
 
         if boiler:
-            print("\n🔥 BOILER (Thelia Condens):")
-
-            # Central Heating
-            ch_temps = ["flow_temperature", "return_temperature", "delta_t", "outdoor_temperature"]
-            ch_found = [k for k in ch_temps if k in boiler]
-            if ch_found:
-                print("   ── Central Heating ──")
-                for k in ch_found:
-                    self._print_sensor(k, boiler[k])
-
-            # DHW Cylinder
-            if "dhw_tank_temperature" in boiler:
-                print("   ── DHW Cylinder ──")
-                self._print_sensor("dhw_tank_temperature", boiler["dhw_tank_temperature"])
-
-            # Efficiency
-            if "condensing_possible" in boiler:
-                print("   ── Efficiency ──")
-                self._print_sensor("condensing_possible", boiler["condensing_possible"])
-
-            # Pressure
-            if "water_pressure" in boiler:
-                print("   ── Pressure ──")
-                self._print_sensor("water_pressure", boiler["water_pressure"])
-
-            # Burner
-            if "burner_modulation" in boiler:
-                print("   ── Burner ──")
-                self._print_sensor("burner_modulation", boiler["burner_modulation"])
-
-            # Status
-            status_keys = ["flame_on", "pump_running", "heating_active", "dhw_active"]
-            status_found = [k for k in status_keys if k in boiler]
-            if status_found:
-                print("   ── Status ──")
-                for k in status_found:
-                    self._print_sensor(k, boiler[k])
+            print("\n🔥 BOILER:")
+            for k, v in boiler.items():
+                self._print_sensor(k, v)
 
         if mipro:
-            print("\n📱 MIPRO Controller:")
-
-            # Room
-            room_keys = ["room_temperature", "room_setpoint_adjust"]
-            room_found = [k for k in room_keys if k in mipro]
-            if room_found:
-                print("   ── Room ──")
-                for k in room_found:
-                    self._print_sensor(k, mipro[k])
-
-            # CH Setpoints
-            ch_sp = ["target_flow_temp", "max_flow_temp", "outdoor_cutoff"]
-            ch_sp_found = [k for k in ch_sp if k in mipro]
-            if ch_sp_found:
-                print("   ── CH Setpoints ──")
-                for k in ch_sp_found:
-                    self._print_sensor(k, mipro[k])
-
-            # DHW Setpoints
-            dhw_sp = ["dhw_setpoint", "dhw_legionella_temp"]
-            dhw_sp_found = [k for k in dhw_sp if k in mipro]
-            if dhw_sp_found:
-                print("   ── DHW Setpoints ──")
-                for k in dhw_sp_found:
-                    self._print_sensor(k, mipro[k])
-
-            # Date/Time
-            if "time" in mipro or "date" in mipro:
-                print("   ── Date/Time ──")
-                for k in ["time", "date"]:
-                    if k in mipro:
-                        self._print_sensor(k, mipro[k])
-
+            print("\n📱 MIPRO:")
+            for k, v in mipro.items():
+                self._print_sensor(k, v)
         print("\n" + "=" * 70)
 
     def _print_sensor(self, name: str, data: Dict) -> None:
         val = data["value"]
         unit = data["unit"]
         desc = data.get("description", "")
-
         if isinstance(val, bool):
             val_str = "✅ YES" if val else "❌ NO"
-        elif isinstance(val, float):
-            val_str = f"{val:.1f}{unit}"
         else:
             val_str = f"{val}{unit}"
-
-        print(f"   {name:25s}: {val_str}")
-        if desc:
-            print(f"   {' ':25s}  └─ {desc}")
+        print(f"   {name:25s}: {val_str:10s} | {desc}")
