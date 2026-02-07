@@ -1,6 +1,6 @@
 """
 Thelia + MiPro parser with all sensors.
-FIXED VERSION: Handles Instant Writes, Pump Status, and Ghost Data Filtering.
+FIXED VERSION: Handles Instant Writes, Pump Status, Ghost Data Filtering, and Room Temp Priority.
 """
 
 import logging
@@ -150,7 +150,7 @@ class TheliaParser:
 class DataAggregator:
     """
     Aggregates sensor values for Thelia Condens + MiPro.
-    FIXED: Adds "Sanity Check" ranges to ignore ghost spikes (e.g., 75°C Flow, 100°C Room).
+    FIXED: Prioritizes B509 (Thermostat) for Room Temp and ignores B511 (Boiler) if 0.0.
     """
 
     def __init__(self, max_age: float = 300.0):
@@ -179,23 +179,21 @@ class DataAggregator:
 
             if query_type == 1 and len(resp) >= 6:
                 # Type 1: Live Temperatures
-
-                # SANITY CHECK: Flow/Return must be between 5 and 95
                 if resp[0] != 0xFF:
                     self._set_sensor("boiler.flow_temperature", resp[0] / 2.0, "°C", ts,
-                                     "Flow temperature", min_v=5.0, max_v=95.0)
+                                   "Flow temperature", min_v=5.0, max_v=95.0)
 
                 if resp[1] != 0xFF:
                     self._set_sensor("boiler.return_temperature", resp[1] / 2.0, "°C", ts,
-                                     "Return temperature", min_v=5.0, max_v=95.0)
+                                   "Return temperature", min_v=5.0, max_v=95.0)
 
                 # DHW Tank (Try Byte 5 first, then Byte 2)
                 if resp[5] != 0xFF:
                     self._set_sensor("boiler.dhw_tank_temperature", resp[5] / 2.0, "°C", ts,
-                                     "DHW Cylinder Temp", min_v=5.0, max_v=85.0)
+                                   "DHW Cylinder Temp", min_v=5.0, max_v=85.0)
                 elif resp[2] != 0xFF:
                     self._set_sensor("boiler.dhw_tank_temperature", resp[2] / 2.0, "°C", ts,
-                                     "DHW Cylinder Temp (Aux)", min_v=5.0, max_v=85.0)
+                                   "DHW Cylinder Temp (Aux)", min_v=5.0, max_v=85.0)
 
                 # Calc Delta T (Only if we have valid Flow/Return)
                 flow_val = self.get_sensor("boiler.flow_temperature")
@@ -207,11 +205,10 @@ class DataAggregator:
             elif query_type == 0 and len(resp) >= 8:
                 # Type 0: Status/Pressure/State
 
-                # SANITY CHECK: Room Temp must be reasonable (0 to 40)
-                # This fixes the "100°C Room" ghost issue
+                # --- FIX: Only accept Room Temp from Boiler if > 1.0 (Ignores 0.0) ---
                 if resp[3] != 0xFF:
                     self._set_sensor("mipro.room_temperature", resp[3] / 2.0, "°C", ts,
-                                     "Room Temperature", min_v=0.0, max_v=40.0)
+                                   "Room Temperature (Boiler Reading)", min_v=1.0, max_v=40.0)
 
                 # Pump Status (from State Code Byte 4)
                 if resp[4] != 0xFF:
@@ -228,7 +225,7 @@ class DataAggregator:
                 # SANITY CHECK: Water Pressure (0.0 to 3.5 bar)
                 if resp[2] != 0xFF:
                     self._set_sensor("boiler.water_pressure", resp[2] / 10.0, "bar", ts,
-                                     "Water Pressure", min_v=0.0, max_v=3.5)
+                                   "Water Pressure", min_v=0.0, max_v=3.5)
 
                 if resp[7] != 0xFF:
                     ext_status = resp[7]
@@ -243,7 +240,7 @@ class DataAggregator:
 
                 if resp[1] != 0xFF:
                     self._set_sensor("boiler.outdoor_cutoff_internal", resp[1], "°C", ts,
-                                     "Boiler Internal Cutoff (Ignored by MiPro)")
+                                   "Boiler Internal Cutoff (Ignored by MiPro)")
 
                 if resp[2] != 0xFF:
                     self._set_sensor("mipro.max_flow_temp", resp[2] / 2.0, "°C", ts, "Max Flow Limit")
@@ -270,31 +267,25 @@ class DataAggregator:
             # Confirmed via debug dump: Bytes 8-9 contain outdoor temp
             if len(resp) >= 10:
                 val = int.from_bytes(resp[8:10], 'little', signed=True) / 256.0
-                # SANITY CHECK: Outdoor temp -40 to +50
                 self._set_sensor("boiler.outdoor_temperature", round(val, 1), "°C", ts,
-                                 "Outdoor Temp", min_v=-40.0, max_v=50.0)
+                               "Outdoor Temp", min_v=-40.0, max_v=50.0)
 
-        # === B509: Backup Room Temp ===
+        # === B509: Direct Room Temp (Primary Source) ===
         elif msg.name == "room_temp" and len(data) >= 2:
             if data[0] != 0xFF:
-                # Only update if we haven't seen a fresher one from B511
-                existing = self.get_sensor("mipro.room_temperature")
-                if existing is None:
-                    # SANITY CHECK: Room Temp 0 to 40
-                    self._set_sensor("mipro.room_temperature", data[0] / 2.0, "°C", ts,
-                                     "Room Temperature (Backup)", min_v=0.0, max_v=40.0)
+                # --- FIX: ALWAYS update if valid (Priority over Boiler) ---
+                self._set_sensor("mipro.room_temperature", data[0] / 2.0, "°C", ts,
+                               "Room Temperature (Direct)", min_v=1.0, max_v=40.0)
 
     def _set_sensor(self, name: str, value: Any, unit: str,
-                    timestamp: datetime, description: str = "",
-                    min_v: float = None, max_v: float = None) -> None:
+                   timestamp: datetime, description: str = "",
+                   min_v: float = None, max_v: float = None) -> None:
 
         # Apply Sanity Checks
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             if min_v is not None and value < min_v:
-                # Value is too low (impossible), ignore it
                 return
             if max_v is not None and value > max_v:
-                # Value is too high (impossible), ignore it
                 return
 
         self._sensors[name] = {
@@ -330,7 +321,7 @@ class DataAggregator:
     def print_status(self) -> None:
         sensors = self.get_all_sensors()
         print("\n" + "=" * 70)
-        print("📊 HEATING SYSTEM STATUS (Filtered)")
+        print("📊 HEATING SYSTEM STATUS (Fixed)")
         print("=" * 70)
 
         boiler = {k.replace("boiler.", ""): v for k, v in sensors.items() if k.startswith("boiler.")}
