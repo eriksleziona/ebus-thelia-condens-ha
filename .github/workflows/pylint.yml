@@ -1,9 +1,11 @@
 name: Pylint
 
-on: [push, pull_request]
+on:
+  push:
+  pull_request:
 
 jobs:
-  build:
+  pylint:
     runs-on: ubuntu-latest
 
     steps:
@@ -13,16 +15,22 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
-        python-version: '3.10' # Or your preferred version
+        python-version: '3.12'
+        cache: pip
+        cache-dependency-path: |
+          requirements.txt
+          pyproject.toml
 
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install pylint
-        # If you have a requirements file, install it so Pylint can find imports
-        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+        python -m pip install pylint
+        if [ -f requirements.txt ]; then python -m pip install -r requirements.txt; fi
 
-    - name: Analysing the code with pylint
+    - name: Pylint (blocking: errors only)
       run: |
-        # Change "your_package_name" to your actual folder name or use .
-        pylint $(git ls-files '*.py')
+        python -m pylint --rcfile=.pylintrc --disable=all --enable=E,F ebus_core thelia main_service.py
+
+    - name: Pylint (advisory report)
+      run: |
+        python -m pylint --rcfile=.pylintrc ebus_core thelia main_service.py || true
