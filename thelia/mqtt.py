@@ -58,6 +58,12 @@ class HAMqttClient:
                 "icon": "mdi:fire",
                 "state_class": "measurement"
             },
+            "boiler.burner_modulation_q2": {
+                "name": "Burner Modulation (B511 Q2)",
+                "unit": "%",
+                "icon": "mdi:chart-bell-curve-cumulative",
+                "state_class": "measurement"
+            },
             "boiler.modulation_source": {
                 "name": "Modulation Source",
                 "icon": "mdi:source-branch"

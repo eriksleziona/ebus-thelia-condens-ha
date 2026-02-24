@@ -181,6 +181,7 @@ class DataAggregator:
         self._last_telegram_at: Optional[datetime] = None
         self._last_status_at: Optional[datetime] = None
         self._last_modulation_update_at: Optional[datetime] = None
+        self._last_live_modulation_at: Optional[datetime] = None
         self._modulation_source = "unknown"
         self._modulation_raw_hex = "0x00"
 
@@ -280,10 +281,34 @@ class DataAggregator:
         return sum(1 for ev in self._burner_start_events if since <= ev <= now)
 
     def _set_modulation(self, modulation: int, timestamp: datetime, source: str, raw_byte: Optional[int] = None) -> None:
+        raw = int(raw_byte if raw_byte is not None else modulation) & 0xFF
+        normalized = int(modulation)
+        normalized_source = source
+
+        # Some buses expose modulation in half-percent scale (0..200).
+        if normalized > 100 and raw <= 200:
+            normalized = int(round(raw / 2.0))
+            normalized_source = f"{source}_DIV2"
+
+        if normalized < 0:
+            normalized = 0
+        if normalized > 100:
+            normalized = 100
+
         self._last_modulation_update_at = timestamp
-        self._modulation_source = source
-        self._modulation_raw_hex = f"0x{(raw_byte if raw_byte is not None else modulation) & 0xFF:02X}"
-        self._set_sensor("boiler.burner_modulation", modulation, "%", timestamp, "Modulation", min_v=0, max_v=100)
+        if not source.startswith("B511_Q2"):
+            self._last_live_modulation_at = timestamp
+        self._modulation_source = normalized_source
+        self._modulation_raw_hex = f"0x{raw:02X}"
+        self._set_sensor("boiler.burner_modulation", normalized, "%", timestamp, "Modulation", min_v=0, max_v=100)
+
+        # If status telegrams are stale/missing, infer flame from modulation.
+        status_age_s: Optional[float] = None
+        if self._last_status_at is not None:
+            status_age_s = max(0.0, (timestamp - self._last_status_at).total_seconds())
+        status_missing_or_stale = status_age_s is None or status_age_s > self._status_stale_threshold_seconds
+        if status_missing_or_stale:
+            self._set_flame_state(normalized > 0, timestamp)
 
     def _publish_runtime_metrics(self, timestamp: datetime) -> None:
         self._prune_start_events(timestamp)
@@ -473,8 +498,13 @@ class DataAggregator:
             elif query_type == 2 and len(resp) >= 1:
                 # Type 2: Setpoints
                 if len(resp) >= 1 and resp[0] != 0xFF:
-                    modulation = resp[0]
-                    self._set_modulation(modulation, ts, "B511_Q2_B0", raw_byte=resp[0])
+                    modulation_q2 = resp[0]
+                    self._set_sensor("boiler.burner_modulation_q2", modulation_q2, "%", ts, "Modulation (B511 type 2)")
+                    live_age_s: Optional[float] = None
+                    if self._last_live_modulation_at is not None:
+                        live_age_s = max(0.0, (ts - self._last_live_modulation_at).total_seconds())
+                    if live_age_s is None or live_age_s > 120.0:
+                        self._set_modulation(modulation_q2, ts, "B511_Q2_B0", raw_byte=resp[0])
 
                 if len(resp) >= 2 and resp[1] != 0xFF:
                     self._set_sensor("boiler.outdoor_cutoff_internal", resp[1], "°C", ts,
@@ -502,7 +532,7 @@ class DataAggregator:
 
         # === B504: Outdoor ===
         elif msg.name == "modulation_outdoor":
-            if len(resp) >= 1 and resp[0] != 0xFF and resp[0] <= 100:
+            if len(resp) >= 1 and resp[0] != 0xFF:
                 modulation = resp[0]
                 self._set_modulation(modulation, ts, "B504_B0", raw_byte=resp[0])
 
@@ -514,10 +544,15 @@ class DataAggregator:
 
         # === B509: Direct Room Temp (Primary Source) ===
         elif msg.name == "room_temp" and len(data) >= 2:
-            if data[0] != 0xFF:
+            if msg.source == 0x10 and data[0] != 0xFF:
                 # --- FIX: ALWAYS update if valid (Priority over Boiler) ---
                 self._set_sensor("mipro.room_temperature", data[0] / 2.0, "°C", ts,
                                "Room Temperature (Direct)", min_v=1.0, max_v=40.0)
+            elif msg.source == 0x08:
+                if data[0] != 0xFF:
+                    self._set_modulation(data[0], ts, "B509_B0", raw_byte=data[0])
+                if len(resp) >= 1 and resp[0] != 0xFF:
+                    self._set_modulation(resp[0], ts, "B509_R0", raw_byte=resp[0])
 
     def _set_sensor(self, name: str, value: Any, unit: str,
                    timestamp: datetime, description: str = "",

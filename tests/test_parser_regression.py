@@ -138,3 +138,19 @@ def test_status_stale_and_ages(tmp_path):
     aggregator.update(_msg_status_q0(datetime.now(), ext_status=0x00))
     fresh_view = aggregator.get_all_sensors()
     assert fresh_view["boiler.status_stale"]["value"] is False
+
+
+def test_b504_live_modulation_has_priority_over_b511_q2(tmp_path):
+    aggregator = DataAggregator(state_file=str(tmp_path / "runtime_state.json"), flame_debounce_seconds=0)
+    now = datetime.now()
+
+    # Live B504 update first.
+    aggregator.update(_msg_b504(now, bytes([8])))
+    assert aggregator.get_sensor("boiler.burner_modulation") == 8
+    assert aggregator.get_sensor("boiler.modulation_source") == "B504_B0"
+
+    # B511 Q2 arrives shortly after with different value, should not override live source.
+    aggregator.update(_msg_status_q2(now + timedelta(seconds=2), bytes([35, 0, 0, 0, 0, 0])))
+    assert aggregator.get_sensor("boiler.burner_modulation") == 8
+    assert aggregator.get_sensor("boiler.modulation_source") == "B504_B0"
+    assert aggregator.get_sensor("boiler.burner_modulation_q2") == 35

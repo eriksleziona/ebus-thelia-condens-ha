@@ -94,6 +94,7 @@ def main():
             if (
                 (msg.name == "status_temps" and msg.query_data.get('query_type') == 2)
                 or msg.name == "modulation_outdoor"
+                or (msg.name == "room_temp" and msg.source == 0x08)
             ):
                 sensors = aggregator.get_all_sensors()
                 if sensors:
