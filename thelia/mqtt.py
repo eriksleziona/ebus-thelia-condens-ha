@@ -81,6 +81,21 @@ class HAMqttClient:
                 "type": "binary_sensor",
                 "icon": "mdi:fire-alert"
             },
+            "boiler.burner_start_count": {
+                "name": "Burner Start Count",
+                "icon": "mdi:counter",
+                "state_class": "total_increasing"
+            },
+            "boiler.last_flame_on": {
+                "name": "Last Burner ON",
+                "class": "timestamp",
+                "icon": "mdi:clock-start"
+            },
+            "boiler.last_flame_off": {
+                "name": "Last Burner OFF",
+                "class": "timestamp",
+                "icon": "mdi:clock-end"
+            },
             "boiler.pump_status": {
                 "name": "Pump Status",
                 "type": "binary_sensor",

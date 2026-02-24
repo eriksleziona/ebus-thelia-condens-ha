@@ -157,6 +157,10 @@ class DataAggregator:
         self.max_age = max_age
         self._sensors: Dict[str, Dict] = {}
         self.logger = logging.getLogger(self.__class__.__name__)
+        self._last_flame_state: Optional[bool] = None
+        self._burner_start_count = 0
+        self._last_flame_on: Optional[datetime] = None
+        self._last_flame_off: Optional[datetime] = None
 
     def update(self, message: ParsedMessage) -> None:
         if message.name in ("unknown", "device_id"):
@@ -167,6 +171,36 @@ class DataAggregator:
             return
 
         self._extract_sensors(message, telegram)
+
+    def _to_iso8601(self, ts: datetime) -> str:
+        try:
+            return ts.astimezone().isoformat(timespec="seconds")
+        except ValueError:
+            return ts.isoformat(timespec="seconds")
+
+    def _set_flame_state(self, flame_on: bool, timestamp: datetime) -> None:
+        prev_state = self._last_flame_state
+
+        if prev_state is None:
+            if flame_on:
+                self._last_flame_on = timestamp
+        else:
+            if not prev_state and flame_on:
+                self._burner_start_count += 1
+                self._last_flame_on = timestamp
+                self.logger.info(f"Burner start detected. Count={self._burner_start_count}")
+            elif prev_state and not flame_on:
+                self._last_flame_off = timestamp
+
+        self._last_flame_state = flame_on
+
+        self._set_sensor("boiler.flame_on", flame_on, "", timestamp, "Burner Flame")
+        self._set_sensor("boiler.burner_start_count", self._burner_start_count, "", timestamp, "Burner start count")
+
+        if self._last_flame_on is not None:
+            self._set_sensor("boiler.last_flame_on", self._to_iso8601(self._last_flame_on), "", timestamp, "Last burner ON")
+        if self._last_flame_off is not None:
+            self._set_sensor("boiler.last_flame_off", self._to_iso8601(self._last_flame_off), "", timestamp, "Last burner OFF")
 
     def _extract_sensors(self, msg: ParsedMessage, telegram: EbusTelegram) -> None:
         ts = msg.timestamp
@@ -232,7 +266,7 @@ class DataAggregator:
                     flame_from_status = bool(ext_status & 0x01)
                     # ExaControl behavior: when heating/DHW mode toggles, reflect that in flame state.
                     flame_proxy_from_mode = heating_active or dhw_active
-                    self._set_sensor("boiler.flame_on", flame_from_status or flame_proxy_from_mode, "", ts, "Burner Flame")
+                    self._set_flame_state(flame_from_status or flame_proxy_from_mode, ts)
                     self._set_sensor("boiler.dhw_active", dhw_active, "", ts, "DHW Mode")
                     self._set_sensor("boiler.heating_active", heating_active, "", ts, "Heating Mode")
 
