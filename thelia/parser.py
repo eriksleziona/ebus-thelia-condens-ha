@@ -7,7 +7,7 @@ import logging
 import json
 from typing import Dict, Any, Optional, List, Callable
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from ebus_core.telegram import EbusTelegram
@@ -160,46 +160,61 @@ class DataAggregator:
         max_age: float = 300.0,
         state_file: str = "config/runtime_state.json",
         flame_debounce_seconds: float = 8.0,
+        status_stale_threshold_seconds: float = 120.0,
     ):
         self.max_age = max_age
         self._sensors: Dict[str, Dict] = {}
         self.logger = logging.getLogger(self.__class__.__name__)
         self._state_file = Path(state_file) if state_file else None
         self._flame_debounce_seconds = max(0.0, flame_debounce_seconds)
+        self._status_stale_threshold_seconds = max(1.0, status_stale_threshold_seconds)
         self._last_flame_state: Optional[bool] = None
         self._pending_flame_state: Optional[bool] = None
         self._pending_flame_since: Optional[datetime] = None
         self._burner_start_count = 0
         self._burner_runtime_total_s = 0.0
         self._burner_last_cycle_s = 0.0
+        self._burner_start_events: List[datetime] = []
         self._last_flame_on: Optional[datetime] = None
         self._last_flame_off: Optional[datetime] = None
         self._active_cycle_started_at: Optional[datetime] = None
+        self._last_telegram_at: Optional[datetime] = None
+        self._last_status_at: Optional[datetime] = None
+        self._last_modulation_update_at: Optional[datetime] = None
+        self._modulation_source = "unknown"
+        self._modulation_raw_hex = "0x00"
 
         self._load_runtime_state()
 
     def update(self, message: ParsedMessage) -> None:
+        self._last_telegram_at = message.timestamp
+
         if message.name in ("unknown", "device_id"):
+            self._publish_runtime_metrics(message.timestamp)
             return
 
         telegram = message.raw_telegram
         if telegram is None:
+            self._publish_runtime_metrics(message.timestamp)
             return
 
         self._extract_sensors(message, telegram)
+        self._publish_runtime_metrics(message.timestamp)
 
     def _to_iso8601(self, ts: datetime) -> str:
-        try:
-            return ts.astimezone().isoformat(timespec="seconds")
-        except ValueError:
-            return ts.isoformat(timespec="seconds")
+        if ts.tzinfo is not None:
+            ts = ts.astimezone().replace(tzinfo=None)
+        return ts.isoformat(timespec="seconds")
 
     def _parse_iso8601(self, value: Optional[str]) -> Optional[datetime]:
         if not value:
             return None
         try:
             normalized = value.replace("Z", "+00:00")
-            return datetime.fromisoformat(normalized)
+            parsed = datetime.fromisoformat(normalized)
+            if parsed.tzinfo is not None:
+                parsed = parsed.astimezone().replace(tzinfo=None)
+            return parsed
         except ValueError:
             return None
 
@@ -214,6 +229,12 @@ class DataAggregator:
             self._burner_last_cycle_s = float(data.get("burner_last_cycle_s", 0.0))
             self._last_flame_on = self._parse_iso8601(data.get("last_flame_on"))
             self._last_flame_off = self._parse_iso8601(data.get("last_flame_off"))
+            self._burner_start_events = []
+            for item in data.get("burner_start_events", []):
+                parsed = self._parse_iso8601(item)
+                if parsed is not None:
+                    self._burner_start_events.append(parsed)
+            self._prune_start_events(datetime.now())
 
             last_flame_state = data.get("last_flame_state")
             if isinstance(last_flame_state, bool):
@@ -231,6 +252,8 @@ class DataAggregator:
         if self._state_file is None:
             return
 
+        self._prune_start_events(datetime.now())
+
         payload = {
             "burner_start_count": self._burner_start_count,
             "burner_runtime_total_s": round(self._burner_runtime_total_s, 1),
@@ -238,6 +261,7 @@ class DataAggregator:
             "last_flame_on": self._to_iso8601(self._last_flame_on) if self._last_flame_on else None,
             "last_flame_off": self._to_iso8601(self._last_flame_off) if self._last_flame_off else None,
             "last_flame_state": self._last_flame_state,
+            "burner_start_events": [self._to_iso8601(ev) for ev in self._burner_start_events],
         }
 
         try:
@@ -247,6 +271,50 @@ class DataAggregator:
             tmp_path.replace(self._state_file)
         except Exception as e:
             self.logger.warning(f"Could not persist runtime state to {self._state_file}: {e}")
+
+    def _prune_start_events(self, now: datetime) -> None:
+        cutoff = now - timedelta(days=8)
+        self._burner_start_events = [ev for ev in self._burner_start_events if ev >= cutoff]
+
+    def _count_starts_since(self, since: datetime, now: datetime) -> int:
+        return sum(1 for ev in self._burner_start_events if since <= ev <= now)
+
+    def _set_modulation(self, modulation: int, timestamp: datetime, source: str, raw_byte: Optional[int] = None) -> None:
+        self._last_modulation_update_at = timestamp
+        self._modulation_source = source
+        self._modulation_raw_hex = f"0x{(raw_byte if raw_byte is not None else modulation) & 0xFF:02X}"
+        self._set_sensor("boiler.burner_modulation", modulation, "%", timestamp, "Modulation", min_v=0, max_v=100)
+
+    def _publish_runtime_metrics(self, timestamp: datetime) -> None:
+        self._prune_start_events(timestamp)
+        self._publish_flame_metrics(timestamp)
+
+        if self._last_telegram_at is not None:
+            ebus_age_s = max(0.0, (timestamp - self._last_telegram_at).total_seconds())
+            self._set_sensor("boiler.ebus_last_seen_s", int(round(ebus_age_s)), "s", timestamp, "Age of last eBUS telegram")
+
+        if self._last_modulation_update_at is not None:
+            modulation_age_s = max(0.0, (timestamp - self._last_modulation_update_at).total_seconds())
+            self._set_sensor("boiler.modulation_last_update_s", int(round(modulation_age_s)), "s", timestamp, "Age of last modulation update")
+
+        status_age_s: Optional[float] = None
+        if self._last_status_at is not None:
+            status_age_s = max(0.0, (timestamp - self._last_status_at).total_seconds())
+        status_stale = status_age_s is None or status_age_s > self._status_stale_threshold_seconds
+        if status_age_s is not None:
+            self._set_sensor("boiler.status_last_update_s", int(round(status_age_s)), "s", timestamp, "Age of last status type 0 update")
+        self._set_sensor("boiler.status_stale", status_stale, "", timestamp, "Status telegram is stale")
+
+        day_start = timestamp.replace(hour=0, minute=0, second=0, microsecond=0)
+        starts_today = self._count_starts_since(day_start, timestamp)
+        starts_24h = self._count_starts_since(timestamp - timedelta(hours=24), timestamp)
+        starts_7d = self._count_starts_since(timestamp - timedelta(days=7), timestamp)
+        self._set_sensor("boiler.burner_starts_today", starts_today, "", timestamp, "Burner starts today")
+        self._set_sensor("boiler.burner_starts_24h", starts_24h, "", timestamp, "Burner starts last 24h")
+        self._set_sensor("boiler.burner_starts_7d", starts_7d, "", timestamp, "Burner starts last 7d")
+
+        self._set_sensor("boiler.modulation_source", self._modulation_source, "", timestamp, "Last modulation source")
+        self._set_sensor("boiler.modulation_raw_hex", self._modulation_raw_hex, "", timestamp, "Last modulation raw byte")
 
     def _publish_flame_metrics(self, timestamp: datetime) -> None:
         current_cycle_s = 0.0
@@ -280,6 +348,8 @@ class DataAggregator:
         elif previous_state != flame_on:
             if flame_on:
                 self._burner_start_count += 1
+                self._burner_start_events.append(timestamp)
+                self._prune_start_events(timestamp)
                 self._last_flame_on = timestamp
                 self._active_cycle_started_at = timestamp
                 self.logger.info(f"Burner start detected. Count={self._burner_start_count}")
@@ -367,6 +437,7 @@ class DataAggregator:
 
             elif query_type == 0 and len(resp) >= 8:
                 # Type 0: Status/Pressure/State
+                self._last_status_at = ts
 
                 # --- FIX: Only accept Room Temp from Boiler if > 1.0 (Ignores 0.0) ---
                 if resp[3] != 0xFF:
@@ -403,7 +474,7 @@ class DataAggregator:
                 # Type 2: Setpoints
                 if len(resp) >= 1 and resp[0] != 0xFF:
                     modulation = resp[0]
-                    self._set_sensor("boiler.burner_modulation", modulation, "%", ts, "Modulation", min_v=0, max_v=100)
+                    self._set_modulation(modulation, ts, "B511_Q2_B0", raw_byte=resp[0])
 
                 if len(resp) >= 2 and resp[1] != 0xFF:
                     self._set_sensor("boiler.outdoor_cutoff_internal", resp[1], "°C", ts,
@@ -433,7 +504,7 @@ class DataAggregator:
         elif msg.name == "modulation_outdoor":
             if len(resp) >= 1 and resp[0] != 0xFF and resp[0] <= 100:
                 modulation = resp[0]
-                self._set_sensor("boiler.burner_modulation", modulation, "%", ts, "Modulation")
+                self._set_modulation(modulation, ts, "B504_B0", raw_byte=resp[0])
 
             # Confirmed via debug dump: Bytes 8-9 contain outdoor temp
             if len(resp) >= 10:
@@ -476,6 +547,7 @@ class DataAggregator:
         return data["value"]
 
     def get_all_sensors(self) -> Dict[str, Dict]:
+        self._publish_runtime_metrics(datetime.now())
         result = {}
         now = datetime.now()
         for name, data in self._sensors.items():
