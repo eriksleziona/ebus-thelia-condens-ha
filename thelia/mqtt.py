@@ -86,6 +86,27 @@ class HAMqttClient:
                 "icon": "mdi:counter",
                 "state_class": "total_increasing"
             },
+            "boiler.burner_runtime_total_s": {
+                "name": "Burner Runtime Total",
+                "class": "duration",
+                "unit": "s",
+                "icon": "mdi:timer-outline",
+                "state_class": "total_increasing"
+            },
+            "boiler.burner_runtime_current_cycle_s": {
+                "name": "Burner Runtime Current Cycle",
+                "class": "duration",
+                "unit": "s",
+                "icon": "mdi:timer-play-outline",
+                "state_class": "measurement"
+            },
+            "boiler.burner_last_cycle_s": {
+                "name": "Burner Runtime Last Cycle",
+                "class": "duration",
+                "unit": "s",
+                "icon": "mdi:history",
+                "state_class": "measurement"
+            },
             "boiler.last_flame_on": {
                 "name": "Last Burner ON",
                 "class": "timestamp",

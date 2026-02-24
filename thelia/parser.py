@@ -4,9 +4,11 @@ FIXED VERSION: Handles Instant Writes, Pump Status, Ghost Data Filtering, and Ro
 """
 
 import logging
+import json
 from typing import Dict, Any, Optional, List, Callable
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 
 from ebus_core.telegram import EbusTelegram
 from .messages import MessageDefinition, get_message_definition
@@ -153,14 +155,28 @@ class DataAggregator:
     FIXED: Prioritizes B509 (Thermostat) for Room Temp and ignores B511 (Boiler) if 0.0.
     """
 
-    def __init__(self, max_age: float = 300.0):
+    def __init__(
+        self,
+        max_age: float = 300.0,
+        state_file: str = "config/runtime_state.json",
+        flame_debounce_seconds: float = 8.0,
+    ):
         self.max_age = max_age
         self._sensors: Dict[str, Dict] = {}
         self.logger = logging.getLogger(self.__class__.__name__)
+        self._state_file = Path(state_file) if state_file else None
+        self._flame_debounce_seconds = max(0.0, flame_debounce_seconds)
         self._last_flame_state: Optional[bool] = None
+        self._pending_flame_state: Optional[bool] = None
+        self._pending_flame_since: Optional[datetime] = None
         self._burner_start_count = 0
+        self._burner_runtime_total_s = 0.0
+        self._burner_last_cycle_s = 0.0
         self._last_flame_on: Optional[datetime] = None
         self._last_flame_off: Optional[datetime] = None
+        self._active_cycle_started_at: Optional[datetime] = None
+
+        self._load_runtime_state()
 
     def update(self, message: ParsedMessage) -> None:
         if message.name in ("unknown", "device_id"):
@@ -178,29 +194,142 @@ class DataAggregator:
         except ValueError:
             return ts.isoformat(timespec="seconds")
 
-    def _set_flame_state(self, flame_on: bool, timestamp: datetime) -> None:
-        prev_state = self._last_flame_state
+    def _parse_iso8601(self, value: Optional[str]) -> Optional[datetime]:
+        if not value:
+            return None
+        try:
+            normalized = value.replace("Z", "+00:00")
+            return datetime.fromisoformat(normalized)
+        except ValueError:
+            return None
 
-        if prev_state is None:
-            if flame_on:
-                self._last_flame_on = timestamp
-        else:
-            if not prev_state and flame_on:
-                self._burner_start_count += 1
-                self._last_flame_on = timestamp
-                self.logger.info(f"Burner start detected. Count={self._burner_start_count}")
-            elif prev_state and not flame_on:
-                self._last_flame_off = timestamp
+    def _load_runtime_state(self) -> None:
+        if self._state_file is None or not self._state_file.exists():
+            return
 
-        self._last_flame_state = flame_on
+        try:
+            data = json.loads(self._state_file.read_text(encoding="utf-8"))
+            self._burner_start_count = int(data.get("burner_start_count", 0))
+            self._burner_runtime_total_s = float(data.get("burner_runtime_total_s", 0.0))
+            self._burner_last_cycle_s = float(data.get("burner_last_cycle_s", 0.0))
+            self._last_flame_on = self._parse_iso8601(data.get("last_flame_on"))
+            self._last_flame_off = self._parse_iso8601(data.get("last_flame_off"))
 
-        self._set_sensor("boiler.flame_on", flame_on, "", timestamp, "Burner Flame")
-        self._set_sensor("boiler.burner_start_count", self._burner_start_count, "", timestamp, "Burner start count")
+            last_flame_state = data.get("last_flame_state")
+            if isinstance(last_flame_state, bool):
+                self._last_flame_state = last_flame_state
+            elif isinstance(last_flame_state, str):
+                normalized = last_flame_state.strip().lower()
+                if normalized in ("on", "true", "1"):
+                    self._last_flame_state = True
+                elif normalized in ("off", "false", "0"):
+                    self._last_flame_state = False
+        except Exception as e:
+            self.logger.warning(f"Could not load runtime state from {self._state_file}: {e}")
+
+    def _save_runtime_state(self) -> None:
+        if self._state_file is None:
+            return
+
+        payload = {
+            "burner_start_count": self._burner_start_count,
+            "burner_runtime_total_s": round(self._burner_runtime_total_s, 1),
+            "burner_last_cycle_s": round(self._burner_last_cycle_s, 1),
+            "last_flame_on": self._to_iso8601(self._last_flame_on) if self._last_flame_on else None,
+            "last_flame_off": self._to_iso8601(self._last_flame_off) if self._last_flame_off else None,
+            "last_flame_state": self._last_flame_state,
+        }
+
+        try:
+            self._state_file.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = self._state_file.with_suffix(self._state_file.suffix + ".tmp")
+            tmp_path.write_text(json.dumps(payload, ensure_ascii=True), encoding="utf-8")
+            tmp_path.replace(self._state_file)
+        except Exception as e:
+            self.logger.warning(f"Could not persist runtime state to {self._state_file}: {e}")
+
+    def _publish_flame_metrics(self, timestamp: datetime) -> None:
+        current_cycle_s = 0.0
+        if self._last_flame_state and self._active_cycle_started_at is not None:
+            current_cycle_s = max(0.0, (timestamp - self._active_cycle_started_at).total_seconds())
+
+        total_runtime_s = self._burner_runtime_total_s + current_cycle_s
+
+        self._set_sensor("boiler.flame_on", bool(self._last_flame_state), "", timestamp, "Burner Flame")
+        self._set_sensor("boiler.burner_start_count", int(self._burner_start_count), "", timestamp, "Burner start count")
+        self._set_sensor("boiler.burner_runtime_total_s", int(round(total_runtime_s)), "s", timestamp, "Burner runtime total")
+        self._set_sensor("boiler.burner_runtime_current_cycle_s", int(round(current_cycle_s)), "s", timestamp, "Burner runtime current cycle")
+        self._set_sensor("boiler.burner_last_cycle_s", int(round(self._burner_last_cycle_s)), "s", timestamp, "Burner runtime last cycle")
 
         if self._last_flame_on is not None:
             self._set_sensor("boiler.last_flame_on", self._to_iso8601(self._last_flame_on), "", timestamp, "Last burner ON")
         if self._last_flame_off is not None:
             self._set_sensor("boiler.last_flame_off", self._to_iso8601(self._last_flame_off), "", timestamp, "Last burner OFF")
+
+    def _commit_flame_state(self, flame_on: bool, timestamp: datetime) -> None:
+        previous_state = self._last_flame_state
+        self._pending_flame_state = None
+        self._pending_flame_since = None
+
+        if previous_state is None:
+            if flame_on:
+                self._last_flame_on = timestamp
+                self._active_cycle_started_at = timestamp
+            else:
+                self._last_flame_off = timestamp
+        elif previous_state != flame_on:
+            if flame_on:
+                self._burner_start_count += 1
+                self._last_flame_on = timestamp
+                self._active_cycle_started_at = timestamp
+                self.logger.info(f"Burner start detected. Count={self._burner_start_count}")
+            else:
+                self._last_flame_off = timestamp
+                if self._active_cycle_started_at is not None:
+                    cycle_s = max(0.0, (timestamp - self._active_cycle_started_at).total_seconds())
+                    self._burner_last_cycle_s = cycle_s
+                    self._burner_runtime_total_s += cycle_s
+                self._active_cycle_started_at = None
+
+        self._last_flame_state = flame_on
+        self._save_runtime_state()
+
+    def _set_flame_state(self, flame_on: bool, timestamp: datetime) -> None:
+        if self._last_flame_state is None:
+            self._commit_flame_state(flame_on, timestamp)
+            self._publish_flame_metrics(timestamp)
+            return
+
+        if flame_on == self._last_flame_state:
+            self._pending_flame_state = None
+            self._pending_flame_since = None
+            if flame_on and self._active_cycle_started_at is None:
+                # After restart we may know flame is ON from persisted state but not cycle start.
+                self._active_cycle_started_at = timestamp
+            self._publish_flame_metrics(timestamp)
+            return
+
+        if self._flame_debounce_seconds <= 0:
+            self._commit_flame_state(flame_on, timestamp)
+            self._publish_flame_metrics(timestamp)
+            return
+
+        if self._pending_flame_state != flame_on:
+            self._pending_flame_state = flame_on
+            self._pending_flame_since = timestamp
+            self._publish_flame_metrics(timestamp)
+            return
+
+        if self._pending_flame_since is None:
+            self._pending_flame_since = timestamp
+            self._publish_flame_metrics(timestamp)
+            return
+
+        pending_for = (timestamp - self._pending_flame_since).total_seconds()
+        if pending_for >= self._flame_debounce_seconds:
+            self._commit_flame_state(flame_on, timestamp)
+
+        self._publish_flame_metrics(timestamp)
 
     def _extract_sensors(self, msg: ParsedMessage, telegram: EbusTelegram) -> None:
         ts = msg.timestamp
