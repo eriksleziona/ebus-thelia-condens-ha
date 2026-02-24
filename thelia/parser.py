@@ -227,19 +227,20 @@ class DataAggregator:
 
                 if resp[7] != 0xFF:
                     ext_status = resp[7]
+                    heating_active = bool(ext_status & 0x80)
+                    dhw_active = bool(ext_status & 0x04)
                     flame_from_status = bool(ext_status & 0x01)
-                    modulation = self.get_sensor("boiler.burner_modulation")
-                    flame_from_modulation = isinstance(modulation, (int, float)) and modulation > 0
-                    self._set_sensor("boiler.flame_on", flame_from_status or flame_from_modulation, "", ts, "Burner Flame")
-                    self._set_sensor("boiler.dhw_active", bool(ext_status & 0x04), "", ts, "DHW Mode")
-                    self._set_sensor("boiler.heating_active", bool(ext_status & 0x80), "", ts, "Heating Mode")
+                    # ExaControl behavior: when heating/DHW mode toggles, reflect that in flame state.
+                    flame_proxy_from_mode = heating_active or dhw_active
+                    self._set_sensor("boiler.flame_on", flame_from_status or flame_proxy_from_mode, "", ts, "Burner Flame")
+                    self._set_sensor("boiler.dhw_active", dhw_active, "", ts, "DHW Mode")
+                    self._set_sensor("boiler.heating_active", heating_active, "", ts, "Heating Mode")
 
             elif query_type == 2 and len(resp) >= 6:
                 # Type 2: Setpoints
                 if resp[0] != 0xFF:
                     modulation = resp[0]
                     self._set_sensor("boiler.burner_modulation", modulation, "%", ts, "Modulation", min_v=0, max_v=100)
-                    self._set_sensor("boiler.flame_on", modulation > 0, "", ts, "Burner Flame")
 
                 if resp[1] != 0xFF:
                     self._set_sensor("boiler.outdoor_cutoff_internal", resp[1], "°C", ts,
@@ -270,7 +271,6 @@ class DataAggregator:
             if len(resp) >= 1 and resp[0] != 0xFF and resp[0] <= 100:
                 modulation = resp[0]
                 self._set_sensor("boiler.burner_modulation", modulation, "%", ts, "Modulation")
-                self._set_sensor("boiler.flame_on", modulation > 0, "", ts, "Burner Flame")
 
             # Confirmed via debug dump: Bytes 8-9 contain outdoor temp
             if len(resp) >= 10:
