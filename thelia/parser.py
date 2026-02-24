@@ -218,9 +218,7 @@ class DataAggregator:
                     # S.02-S.08 = Heating (Pump Running)
                     # S.10-S.17 = DHW (Pump Running)
                     pump_running = state_code in [2, 3, 4, 5, 6, 7, 8, 10, 14, 17]
-                    state_str = "ON" if pump_running else "OFF"
-
-                    self._set_sensor("boiler.pump_status", state_str, "", ts, f"Pump State (S.{state_code:02d})")
+                    self._set_sensor("boiler.pump_status", pump_running, "", ts, f"Pump State (S.{state_code:02d})")
 
                 # SANITY CHECK: Water Pressure (0.0 to 3.5 bar)
                 if resp[2] != 0xFF:
@@ -229,14 +227,19 @@ class DataAggregator:
 
                 if resp[7] != 0xFF:
                     ext_status = resp[7]
-                    self._set_sensor("boiler.flame_on", bool(ext_status & 0x01), "", ts, "Burner Flame")
+                    flame_from_status = bool(ext_status & 0x01)
+                    modulation = self.get_sensor("boiler.burner_modulation")
+                    flame_from_modulation = isinstance(modulation, (int, float)) and modulation > 0
+                    self._set_sensor("boiler.flame_on", flame_from_status or flame_from_modulation, "", ts, "Burner Flame")
                     self._set_sensor("boiler.dhw_active", bool(ext_status & 0x04), "", ts, "DHW Mode")
                     self._set_sensor("boiler.heating_active", bool(ext_status & 0x80), "", ts, "Heating Mode")
 
             elif query_type == 2 and len(resp) >= 6:
                 # Type 2: Setpoints
                 if resp[0] != 0xFF:
-                    self._set_sensor("boiler.burner_modulation", resp[0], "%", ts, "Modulation", min_v=0, max_v=100)
+                    modulation = resp[0]
+                    self._set_sensor("boiler.burner_modulation", modulation, "%", ts, "Modulation", min_v=0, max_v=100)
+                    self._set_sensor("boiler.flame_on", modulation > 0, "", ts, "Burner Flame")
 
                 if resp[1] != 0xFF:
                     self._set_sensor("boiler.outdoor_cutoff_internal", resp[1], "°C", ts,
@@ -264,6 +267,11 @@ class DataAggregator:
 
         # === B504: Outdoor ===
         elif msg.name == "modulation_outdoor":
+            if len(resp) >= 1 and resp[0] != 0xFF and resp[0] <= 100:
+                modulation = resp[0]
+                self._set_sensor("boiler.burner_modulation", modulation, "%", ts, "Modulation")
+                self._set_sensor("boiler.flame_on", modulation > 0, "", ts, "Burner Flame")
+
             # Confirmed via debug dump: Bytes 8-9 contain outdoor temp
             if len(resp) >= 10:
                 val = int.from_bytes(resp[8:10], 'little', signed=True) / 256.0

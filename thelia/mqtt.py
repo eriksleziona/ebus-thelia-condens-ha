@@ -81,7 +81,7 @@ class HAMqttClient:
                 "type": "binary_sensor",
                 "icon": "mdi:fire-alert"
             },
-            "boiler.pump_running": {
+            "boiler.pump_status": {
                 "name": "Pump Status",
                 "type": "binary_sensor",
                 "icon": "mdi:pump"
