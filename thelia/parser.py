@@ -270,23 +270,23 @@ class DataAggregator:
                     self._set_sensor("boiler.dhw_active", dhw_active, "", ts, "DHW Mode")
                     self._set_sensor("boiler.heating_active", heating_active, "", ts, "Heating Mode")
 
-            elif query_type == 2 and len(resp) >= 6:
+            elif query_type == 2 and len(resp) >= 1:
                 # Type 2: Setpoints
-                if resp[0] != 0xFF:
+                if len(resp) >= 1 and resp[0] != 0xFF:
                     modulation = resp[0]
                     self._set_sensor("boiler.burner_modulation", modulation, "%", ts, "Modulation", min_v=0, max_v=100)
 
-                if resp[1] != 0xFF:
+                if len(resp) >= 2 and resp[1] != 0xFF:
                     self._set_sensor("boiler.outdoor_cutoff_internal", resp[1], "°C", ts,
                                    "Boiler Internal Cutoff (Ignored by MiPro)")
 
-                if resp[2] != 0xFF:
+                if len(resp) >= 3 and resp[2] != 0xFF:
                     self._set_sensor("mipro.max_flow_temp", resp[2] / 2.0, "°C", ts, "Max Flow Limit")
 
-                if resp[3] != 0xFF:
+                if len(resp) >= 4 and resp[3] != 0xFF:
                     self._set_sensor("boiler.dhw_setpoint_local", resp[3] / 2.0, "°C", ts, "Boiler Dial Setpoint")
 
-                if resp[5] != 0xFF:
+                if len(resp) >= 6 and resp[5] != 0xFF:
                     val = resp[5] / 2.0
                     if 30 <= val <= 75:
                         self._set_sensor("mipro.dhw_setpoint", val, "°C", ts, "DHW Setpoint (Active)")

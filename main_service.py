@@ -63,7 +63,7 @@ def main():
     logger.info("✅ System Running. Monitoring...")
 
     last_publish = 0
-    PUBLISH_INTERVAL = 30
+    PUBLISH_INTERVAL = 5
 
     # NEW: Polling timers
     last_poll = 0
@@ -82,6 +82,16 @@ def main():
             # If we did, reset our "last_poll" timer so we don't spam
             if msg.name == "status_temps" and msg.query_data.get('query_type') == 0:
                 last_poll = time.time()
+
+            # 2b. Publish immediately for live modulation updates
+            if (
+                (msg.name == "status_temps" and msg.query_data.get('query_type') == 2)
+                or msg.name == "modulation_outdoor"
+            ):
+                sensors = aggregator.get_all_sensors()
+                if sensors:
+                    mqtt_client.publish_sensors(sensors)
+                last_publish = time.time()
 
             # 3. Publish to MQTT
             now = time.time()
