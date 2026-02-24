@@ -58,6 +58,21 @@ class HAMqttClient:
                 "icon": "mdi:fire",
                 "state_class": "measurement"
             },
+            "boiler.modulation_source": {
+                "name": "Modulation Source",
+                "icon": "mdi:source-branch"
+            },
+            "boiler.modulation_raw_hex": {
+                "name": "Modulation Raw Hex",
+                "icon": "mdi:code-braces"
+            },
+            "boiler.modulation_last_update_s": {
+                "name": "Modulation Last Update Age",
+                "class": "duration",
+                "unit": "s",
+                "icon": "mdi:update",
+                "state_class": "measurement"
+            },
             "boiler.delta_t": {
                 "name": "Flow-Return Delta",
                 "class": "temperature",
@@ -86,6 +101,42 @@ class HAMqttClient:
                 "icon": "mdi:counter",
                 "state_class": "total_increasing"
             },
+            "boiler.burner_starts_today": {
+                "name": "Burner Starts Today",
+                "icon": "mdi:calendar-today",
+                "state_class": "measurement"
+            },
+            "boiler.burner_starts_24h": {
+                "name": "Burner Starts 24h",
+                "icon": "mdi:calendar-clock",
+                "state_class": "measurement"
+            },
+            "boiler.burner_starts_7d": {
+                "name": "Burner Starts 7d",
+                "icon": "mdi:calendar-week",
+                "state_class": "measurement"
+            },
+            "boiler.burner_runtime_total_s": {
+                "name": "Burner Runtime Total",
+                "class": "duration",
+                "unit": "s",
+                "icon": "mdi:timer-outline",
+                "state_class": "total_increasing"
+            },
+            "boiler.burner_runtime_current_cycle_s": {
+                "name": "Burner Runtime Current Cycle",
+                "class": "duration",
+                "unit": "s",
+                "icon": "mdi:timer-play-outline",
+                "state_class": "measurement"
+            },
+            "boiler.burner_last_cycle_s": {
+                "name": "Burner Runtime Last Cycle",
+                "class": "duration",
+                "unit": "s",
+                "icon": "mdi:history",
+                "state_class": "measurement"
+            },
             "boiler.last_flame_on": {
                 "name": "Last Burner ON",
                 "class": "timestamp",
@@ -95,6 +146,25 @@ class HAMqttClient:
                 "name": "Last Burner OFF",
                 "class": "timestamp",
                 "icon": "mdi:clock-end"
+            },
+            "boiler.ebus_last_seen_s": {
+                "name": "eBUS Last Seen Age",
+                "class": "duration",
+                "unit": "s",
+                "icon": "mdi:lan",
+                "state_class": "measurement"
+            },
+            "boiler.status_last_update_s": {
+                "name": "Status Last Update Age",
+                "class": "duration",
+                "unit": "s",
+                "icon": "mdi:clock-alert-outline",
+                "state_class": "measurement"
+            },
+            "boiler.status_stale": {
+                "name": "Status Stale",
+                "type": "binary_sensor",
+                "icon": "mdi:alert-circle-outline"
             },
             "boiler.pump_status": {
                 "name": "Pump Status",

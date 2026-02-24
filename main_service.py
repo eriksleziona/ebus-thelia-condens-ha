@@ -10,6 +10,9 @@ MQTT_PORT = 1883
 MQTT_USER = "mqtt_user"  # <--- Update these
 MQTT_PASS = "mqtt_password"  # <--- Update these
 SERIAL_PORT = "/dev/ttyAMA0"
+RUNTIME_STATE_FILE = "config/runtime_state.json"
+FLAME_DEBOUNCE_SECONDS = 8.0
+STATUS_STALE_THRESHOLD_SECONDS = 120.0
 
 # Setup logging
 logging.basicConfig(
@@ -49,7 +52,11 @@ def main():
     connection = SerialConnection(ebus_config)
 
     parser = TheliaParser()
-    aggregator = DataAggregator()
+    aggregator = DataAggregator(
+        state_file=RUNTIME_STATE_FILE,
+        flame_debounce_seconds=FLAME_DEBOUNCE_SECONDS,
+        status_stale_threshold_seconds=STATUS_STALE_THRESHOLD_SECONDS,
+    )
 
     mqtt_client = HAMqttClient(MQTT_BROKER, MQTT_PORT, MQTT_USER, MQTT_PASS)
     mqtt_client.connect()
