@@ -20,7 +20,7 @@ STATUS_STALE_THRESHOLD_SECONDS = 120.0
 PUBLISH_INTERVAL_SECONDS = 5
 STATUS_POLL_INTERVAL_SECONDS = 60
 MODULATION_POLL_INTERVAL_SECONDS = 75
-HISTORY_POLL_INTERVAL_SECONDS = 15
+HISTORY_POLL_INTERVAL_SECONDS = 10
 
 POLL_SOURCE_ADDR = 0x30
 POLL_DEST_ADDR = 0x08
@@ -37,33 +37,34 @@ def _build_history_query_sequence():
     - indexed two-byte variants (query_type + index) for month/day buckets.
     """
     sequence = []
-    history_targets = (POLL_DEST_ADDR, MIPRO_DEST_ADDR)
+    history_targets = (MIPRO_DEST_ADDR, POLL_DEST_ADDR)
+    single_queries = (
+        (0x13, bytes([0x00])),
+        (0x13, bytes([0x01])),
+        (0x13, bytes([0x02])),
+        (0x13, bytes([0x03])),
+        (0x13, bytes([0x04])),
+        (0x14, bytes([0x00])),
+        (0x15, bytes([0x00])),
+        (0x15, bytes([0x01])),
+        (0x17, bytes([0x00])),
+        (0x18, bytes([0x00])),
+        (0x19, bytes([0x00])),
+        (0x1A, bytes([0x00])),
+    )
 
-    # Single-byte baseline queries.
-    for destination in history_targets:
-        sequence.extend(
-            [
-                (destination, 0x13, bytes([0x00])),
-                (destination, 0x13, bytes([0x01])),
-                (destination, 0x13, bytes([0x02])),
-                (destination, 0x13, bytes([0x03])),
-                (destination, 0x13, bytes([0x04])),
-                (destination, 0x14, bytes([0x00])),
-                (destination, 0x15, bytes([0x00])),
-                (destination, 0x15, bytes([0x01])),
-                (destination, 0x17, bytes([0x00])),
-                (destination, 0x18, bytes([0x00])),
-                (destination, 0x19, bytes([0x00])),
-                (destination, 0x1A, bytes([0x00])),
-            ]
-        )
+    # Interleave targets so MiPro (0x10) is queried immediately.
+    for secondary_command, payload in single_queries:
+        for destination in history_targets:
+            sequence.append((destination, secondary_command, payload))
 
     # Indexed history windows, likely required for month/day breakdown pages.
     for idx in range(HISTORY_INDEX_MAX + 1):
-        for destination in history_targets:
-            for qtype in (0x00, 0x01, 0x02, 0x03, 0x04):
+        for qtype in (0x00, 0x01, 0x02, 0x03, 0x04):
+            for destination in history_targets:
                 sequence.append((destination, 0x13, bytes([qtype, idx])))
-            for qtype in (0x00, 0x01):
+        for qtype in (0x00, 0x01):
+            for destination in history_targets:
                 sequence.append((destination, 0x15, bytes([qtype, idx])))
 
     return tuple(sequence)
@@ -161,9 +162,14 @@ def main():
             if msg.name in HISTORY_MESSAGE_NAMES:
                 if msg.raw_telegram is not None:
                     resp_len = len(msg.raw_telegram.response_data or b"")
-                    logger.info(
-                        f"History response {msg.name} src=0x{msg.source:02X} dst=0x{msg.destination:02X} q={msg.raw_telegram.data.hex()} resp_len={resp_len}"
-                    )
+                    if resp_len > 0:
+                        logger.info(
+                            f"History response {msg.name} src=0x{msg.source:02X} dst=0x{msg.destination:02X} q={msg.raw_telegram.data.hex()} resp_len={resp_len}"
+                        )
+                    else:
+                        logger.info(
+                            f"History poll echo/no-data {msg.name} src=0x{msg.source:02X} dst=0x{msg.destination:02X} q={msg.raw_telegram.data.hex()}"
+                        )
                 if sensors:
                     mqtt_client.publish_sensors(sensors)
                 last_publish = now
