@@ -190,7 +190,7 @@ class DataAggregator:
     def update(self, message: ParsedMessage) -> None:
         self._last_telegram_at = message.timestamp
 
-        if message.name in ("unknown", "device_id"):
+        if message.name == "device_id":
             self._publish_runtime_metrics(message.timestamp)
             return
 
@@ -199,8 +199,49 @@ class DataAggregator:
             self._publish_runtime_metrics(message.timestamp)
             return
 
+        if message.name == "unknown":
+            self._extract_unknown_history_candidates(message, telegram)
+            self._publish_runtime_metrics(message.timestamp)
+            return
+
         self._extract_sensors(message, telegram)
         self._publish_runtime_metrics(message.timestamp)
+
+    def _extract_unknown_history_candidates(self, msg: ParsedMessage, telegram: EbusTelegram) -> None:
+        if telegram.primary_command != 0xB5:
+            return
+
+        ts = msg.timestamp
+        data = telegram.data or b""
+        resp = telegram.response_data or b""
+        if not resp:
+            return
+
+        query_type: Optional[int] = data[0] if len(data) >= 1 else None
+        query_hex = data.hex() if data else "none"
+        sensor_prefix = f"history.unknown.b5{telegram.secondary_command:02x}.q{query_hex}"
+        label = f"B5{telegram.secondary_command:02X} (unknown)"
+
+        self._publish_history_candidates(
+            sensor_prefix=sensor_prefix,
+            response=resp,
+            timestamp=ts,
+            label=label,
+            query_type=query_type,
+            query_hex=query_hex if data else None,
+        )
+
+        for offset in range(0, min(len(resp) - 1, 8), 2):
+            value_u16 = int.from_bytes(resp[offset:offset + 2], "little")
+            if value_u16 not in (0x0000, 0xFFFF):
+                self._set_sensor(
+                    f"{sensor_prefix}_u16_{offset}",
+                    value_u16,
+                    "",
+                    ts,
+                    f"{label} uint16[{offset}]",
+                    persistent=True,
+                )
 
     def _to_iso8601(self, ts: datetime) -> str:
         if ts.tzinfo is not None:

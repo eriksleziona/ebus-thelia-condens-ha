@@ -213,3 +213,25 @@ def test_history_sensors_persist_beyond_max_age(tmp_path):
     assert aggregator.get_sensor("history.b513.q00_u16_0") == 0x1234
     sensors = aggregator.get_all_sensors()
     assert "history.b513.q00_u16_0" in sensors
+
+
+def test_unknown_b5_with_response_is_published_as_history_candidates(tmp_path):
+    aggregator = DataAggregator(
+        state_file=str(tmp_path / "runtime_state.json"),
+        flame_debounce_seconds=0,
+    )
+    now = datetime.now()
+
+    msg = _make_message(
+        name="unknown",
+        data=bytes([0x09, 0x02]),
+        resp=bytes([0x34, 0x12, 0x00, 0x00]),
+        ts=now,
+        primary=0xB5,
+        secondary=0x77,
+    )
+    aggregator.update(msg)
+
+    sensors = aggregator.get_all_sensors()
+    assert sensors["history.unknown.b577.q0902_response_len"]["value"] == 4
+    assert sensors["history.unknown.b577.q0902_u16_0"]["value"] == 0x1234
