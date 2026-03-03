@@ -11,10 +11,20 @@ from ebus_core.telegram import EbusTelegram
 from thelia.parser import DataAggregator, ParsedMessage
 
 
-def _make_message(name: str, data: bytes, resp: bytes, ts: datetime, primary: int, secondary: int, query_data=None):
+def _make_message(
+    name: str,
+    data: bytes,
+    resp: bytes,
+    ts: datetime,
+    primary: int,
+    secondary: int,
+    query_data=None,
+    source: int = 0x08,
+    destination: int = 0x10,
+):
     telegram = EbusTelegram(
-        source=0x08,
-        destination=0x10,
+        source=source,
+        destination=destination,
         primary_command=primary,
         secondary_command=secondary,
         data=data,
@@ -26,8 +36,8 @@ def _make_message(name: str, data: bytes, resp: bytes, ts: datetime, primary: in
         timestamp=ts,
         source=telegram.source,
         destination=telegram.destination,
-        source_name="boiler",
-        dest_name="mipro",
+        source_name="mipro" if source == 0x10 else "boiler",
+        dest_name="mipro" if destination == 0x10 else "boiler",
         command=(primary, secondary),
         query_data=query_data or {},
         response_data={},
@@ -70,6 +80,19 @@ def _msg_b504(ts: datetime, resp: bytes):
         ts=ts,
         primary=0xB5,
         secondary=0x04,
+    )
+
+
+def _msg_b509_from_mipro(ts: datetime, room_temp_half_deg: int):
+    return _make_message(
+        name="room_temp",
+        data=bytes([room_temp_half_deg, 0x00]),
+        resp=b"",
+        ts=ts,
+        primary=0xB5,
+        secondary=0x09,
+        source=0x10,
+        destination=0x08,
     )
 
 
@@ -162,3 +185,12 @@ def test_modulation_publishes_burner_power_alias(tmp_path):
     aggregator.update(_msg_b504(now, bytes([42])))
     assert aggregator.get_sensor("boiler.burner_modulation") == 42
     assert aggregator.get_sensor("boiler.burner_power_percent") == 42
+
+
+def test_mipro_room_temperature_is_published(tmp_path):
+    aggregator = DataAggregator(state_file=str(tmp_path / "runtime_state.json"), flame_debounce_seconds=0)
+    now = datetime.now()
+
+    aggregator.update(_msg_b509_from_mipro(now, 43))
+    assert aggregator.get_sensor("boiler.room_temperature") == 21.5
+    assert aggregator.get_sensor("mipro.room_temperature") == 21.5

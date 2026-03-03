@@ -51,6 +51,12 @@ class HAMqttClient:
                 "icon": "mdi:home-thermometer",
                 "state_class": "measurement",
             },
+            "mipro.room_temperature": {
+                "name": "Room Temperature (MiPro)",
+                "class": "temperature",
+                "icon": "mdi:sofa-outline",
+                "state_class": "measurement",
+            },
             "boiler.water_pressure": {
                 "name": "System Pressure",
                 "class": "pressure",

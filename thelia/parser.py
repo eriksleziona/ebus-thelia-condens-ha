@@ -1,4 +1,4 @@
-"""
+﻿"""
 Thelia boiler parser and sensor aggregator.
 """
 
@@ -52,7 +52,7 @@ class ParsedMessage:
                 parts.append(f"{k}={'ON' if v else 'OFF'}")
             else:
                 parts.append(f"{k}={v}{unit}")
-        direction = f"{self.source_name}→{self.dest_name}"
+        direction = f"{self.source_name}â†’{self.dest_name}"
         return f"{self.name} [{direction}]: {', '.join(parts)}"
 
     def get(self, key: str, default=None) -> Any:
@@ -441,19 +441,19 @@ class DataAggregator:
             if query_type == 1 and len(resp) >= 6:
                 # Type 1: Live Temperatures
                 if resp[0] != 0xFF:
-                    self._set_sensor("boiler.flow_temperature", resp[0] / 2.0, "°C", ts,
+                    self._set_sensor("boiler.flow_temperature", resp[0] / 2.0, "Â°C", ts,
                                    "Flow temperature", min_v=5.0, max_v=95.0)
 
                 if resp[1] != 0xFF:
-                    self._set_sensor("boiler.return_temperature", resp[1] / 2.0, "°C", ts,
+                    self._set_sensor("boiler.return_temperature", resp[1] / 2.0, "Â°C", ts,
                                    "Return temperature", min_v=5.0, max_v=95.0)
 
                 # DHW Tank (Try Byte 5 first, then Byte 2)
                 if resp[5] != 0xFF:
-                    self._set_sensor("boiler.dhw_tank_temperature", resp[5] / 2.0, "°C", ts,
+                    self._set_sensor("boiler.dhw_tank_temperature", resp[5] / 2.0, "Â°C", ts,
                                    "DHW Cylinder Temp", min_v=5.0, max_v=85.0)
                 elif resp[2] != 0xFF:
-                    self._set_sensor("boiler.dhw_tank_temperature", resp[2] / 2.0, "°C", ts,
+                    self._set_sensor("boiler.dhw_tank_temperature", resp[2] / 2.0, "Â°C", ts,
                                    "DHW Cylinder Temp (Aux)", min_v=5.0, max_v=85.0)
 
                 # Calc Delta T (Only if we have valid Flow/Return)
@@ -461,7 +461,7 @@ class DataAggregator:
                 ret_val = self.get_sensor("boiler.return_temperature")
                 if flow_val is not None and ret_val is not None:
                     delta = flow_val - ret_val
-                    self._set_sensor("boiler.delta_t", round(delta, 1), "°C", ts, "Flow-Return Delta")
+                    self._set_sensor("boiler.delta_t", round(delta, 1), "Â°C", ts, "Flow-Return Delta")
 
                 # Raw bytes for reverse engineering (e.g. fan-speed mapping).
                 if len(resp) >= 4 and resp[3] != 0xFF:
@@ -475,7 +475,7 @@ class DataAggregator:
 
                 # --- FIX: Only accept Room Temp from Boiler if > 1.0 (Ignores 0.0) ---
                 if resp[3] != 0xFF:
-                    self._set_sensor("boiler.room_temperature", resp[3] / 2.0, "°C", ts,
+                    self._set_sensor("boiler.room_temperature", resp[3] / 2.0, "Â°C", ts,
                                    "Room Temperature (Boiler Reading)", min_v=1.0, max_v=40.0)
 
                 # Pump Status (from State Code Byte 4)
@@ -517,19 +517,19 @@ class DataAggregator:
                         self._set_modulation(modulation_q2, ts, "B511_Q2_B0", raw_byte=resp[0])
 
                 if len(resp) >= 2 and resp[1] != 0xFF:
-                    self._set_sensor("boiler.outdoor_cutoff_internal", resp[1], "°C", ts,
+                    self._set_sensor("boiler.outdoor_cutoff_internal", resp[1], "Â°C", ts,
                                    "Boiler Internal Cutoff (ignored by controller)")
 
                 if len(resp) >= 3 and resp[2] != 0xFF:
-                    self._set_sensor("boiler.max_flow_temp_limit", resp[2] / 2.0, "°C", ts, "Max Flow Limit")
+                    self._set_sensor("boiler.max_flow_temp_limit", resp[2] / 2.0, "Â°C", ts, "Max Flow Limit")
 
                 if len(resp) >= 4 and resp[3] != 0xFF:
-                    self._set_sensor("boiler.dhw_setpoint_local", resp[3] / 2.0, "°C", ts, "Boiler Dial Setpoint")
+                    self._set_sensor("boiler.dhw_setpoint_local", resp[3] / 2.0, "Â°C", ts, "Boiler Dial Setpoint")
 
                 if len(resp) >= 6 and resp[5] != 0xFF:
                     val = resp[5] / 2.0
                     if 30 <= val <= 75:
-                        self._set_sensor("boiler.dhw_setpoint_active", val, "°C", ts, "DHW Setpoint (Active)")
+                        self._set_sensor("boiler.dhw_setpoint_active", val, "Â°C", ts, "DHW Setpoint (Active)")
 
                 if len(resp) >= 5 and resp[4] != 0xFF:
                     self._set_sensor("boiler.b511_q2_byte4_raw", resp[4], "", ts, "Raw B511/Q2 byte 4")
@@ -541,7 +541,7 @@ class DataAggregator:
             if param_id == 0x00:
                 dhw_new = val_raw / 2.0
                 if 30 <= dhw_new <= 75:
-                    self._set_sensor("boiler.dhw_setpoint_active", dhw_new, "°C", ts, "DHW Setpoint (Instant Write)")
+                    self._set_sensor("boiler.dhw_setpoint_active", dhw_new, "Â°C", ts, "DHW Setpoint (Instant Write)")
 
         # === B504: Outdoor ===
         elif msg.name == "modulation_outdoor":
@@ -552,14 +552,16 @@ class DataAggregator:
             # Confirmed via debug dump: Bytes 8-9 contain outdoor temp
             if len(resp) >= 10:
                 val = int.from_bytes(resp[8:10], 'little', signed=True) / 256.0
-                self._set_sensor("boiler.outdoor_temperature", round(val, 1), "°C", ts,
+                self._set_sensor("boiler.outdoor_temperature", round(val, 1), "Â°C", ts,
                                "Outdoor Temp", min_v=-40.0, max_v=50.0)
 
         # === B509: Direct Room Temp (Primary Source) ===
         elif msg.name == "room_temp" and len(data) >= 2:
             if msg.source == 0x10 and data[0] != 0xFF:
-                self._set_sensor("boiler.room_temperature", data[0] / 2.0, "°C", ts,
+                self._set_sensor("boiler.room_temperature", data[0] / 2.0, "Â°C", ts,
                                "Room Temperature (Controller)", min_v=1.0, max_v=40.0)
+                self._set_sensor("mipro.room_temperature", data[0] / 2.0, "Â°C", ts,
+                               "Room Temperature (MiPro)", min_v=1.0, max_v=40.0)
             elif msg.source == 0x08:
                 if data[0] != 0xFF:
                     self._set_modulation(data[0], ts, "B509_B0", raw_byte=data[0])
@@ -615,13 +617,13 @@ class DataAggregator:
     def print_status(self) -> None:
         sensors = self.get_all_sensors()
         print("\n" + "=" * 70)
-        print("📊 HEATING SYSTEM STATUS (Fixed)")
+        print("đź“Š HEATING SYSTEM STATUS (Fixed)")
         print("=" * 70)
 
         boiler = {k.replace("boiler.", ""): v for k, v in sensors.items() if k.startswith("boiler.")}
 
         if boiler:
-            print("\n🔥 BOILER:")
+            print("\nđź”Ą BOILER:")
             for k, v in boiler.items():
                 self._print_sensor(k, v)
 
@@ -632,7 +634,8 @@ class DataAggregator:
         unit = data["unit"]
         desc = data.get("description", "")
         if isinstance(val, bool):
-            val_str = "✅ YES" if val else "❌ NO"
+            val_str = "âś… YES" if val else "âťŚ NO"
         else:
             val_str = f"{val}{unit}"
         print(f"   {name:25s}: {val_str:10s} | {desc}")
+
