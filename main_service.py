@@ -155,6 +155,11 @@ def main():
 
             # Push history data immediately when new historical block is received.
             if msg.name in HISTORY_MESSAGE_NAMES:
+                if msg.raw_telegram is not None:
+                    resp_len = len(msg.raw_telegram.response_data or b"")
+                    logger.info(
+                        f"History response {msg.name} q={msg.raw_telegram.data.hex()} resp_len={resp_len}"
+                    )
                 if sensors:
                     mqtt_client.publish_sensors(sensors)
                 last_publish = now

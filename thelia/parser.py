@@ -660,9 +660,11 @@ class DataAggregator:
             )
 
             # Expose first words/dwords as explicit sensors for charting in HA.
+            u16_values: List[tuple] = []
             for offset in range(0, min(len(resp) - 1, 8), 2):
                 value_u16 = int.from_bytes(resp[offset:offset + 2], "little")
                 if value_u16 not in (0x0000, 0xFFFF):
+                    u16_values.append((offset, value_u16))
                     self._set_sensor(
                         f"{sensor_prefix}_u16_{offset}",
                         value_u16,
@@ -672,15 +674,51 @@ class DataAggregator:
                         persistent=True,
                     )
 
+            u32_values: List[tuple] = []
             for offset in range(0, min(len(resp) - 3, 16), 4):
                 value_u32 = int.from_bytes(resp[offset:offset + 4], "little")
                 if value_u32 not in (0x00000000, 0xFFFFFFFF):
+                    u32_values.append((offset, value_u32))
                     self._set_sensor(
                         f"{sensor_prefix}_u32_{offset}",
                         value_u32,
                         "",
                         ts,
                         f"{label} uint32[{offset}]",
+                        persistent=True,
+                    )
+
+            # Best-effort kWh decoding guesses.
+            # Many eBUS counters use fixed-point scale (x10 or x100).
+            for rank, (offset, value_u32) in enumerate(u32_values[:2]):
+                if 100 <= value_u32 <= 4000000000:
+                    self._set_sensor(
+                        f"{sensor_prefix}_kwh_guess_div10_{rank}",
+                        round(value_u32 / 10.0, 1),
+                        "kWh",
+                        ts,
+                        f"{label} guess from uint32[{offset}] / 10",
+                        persistent=True,
+                    )
+                if 1000 <= value_u32 <= 4000000000:
+                    self._set_sensor(
+                        f"{sensor_prefix}_kwh_guess_div100_{rank}",
+                        round(value_u32 / 100.0, 2),
+                        "kWh",
+                        ts,
+                        f"{label} guess from uint32[{offset}] / 100",
+                        persistent=True,
+                    )
+
+            # For shorter blocks exposing only uint16 values, provide basic kWh guess.
+            for rank, (offset, value_u16) in enumerate(u16_values[:2]):
+                if 10 <= value_u16 <= 100000:
+                    self._set_sensor(
+                        f"{sensor_prefix}_kwh_guess_u16_div10_{rank}",
+                        round(value_u16 / 10.0, 1),
+                        "kWh",
+                        ts,
+                        f"{label} guess from uint16[{offset}] / 10",
                         persistent=True,
                     )
 

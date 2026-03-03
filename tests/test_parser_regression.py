@@ -182,6 +182,8 @@ def test_history_stats_are_exposed_as_candidate_sensors(tmp_path):
     assert sensors["history.b513.q00_u16_0"]["value"] == 0x1234
     assert sensors["history.b513.q00_u16_2"]["value"] == 0x5678
     assert sensors["history.b513.q00_u32_0"]["value"] == 0x56781234
+    assert sensors["history.b513.q00_kwh_guess_div10_0"]["value"] == round(0x56781234 / 10.0, 1)
+    assert sensors["history.b513.q00_kwh_guess_div100_0"]["value"] == round(0x56781234 / 100.0, 2)
 
     # q1 should write into a separate namespace.
     resp_q1 = bytes([0x05, 0x00, 0x00, 0x00])
@@ -196,6 +198,7 @@ def test_history_stats_are_exposed_as_candidate_sensors(tmp_path):
     sensors = aggregator.get_all_sensors()
     assert sensors["history.b513.q0002_response_len"]["value"] == 4
     assert sensors["history.b513.q0002_u16_0"]["value"] == 10000
+    assert sensors["history.b513.q0002_kwh_guess_u16_div10_0"]["value"] == 1000.0
 
 
 def test_history_sensors_persist_beyond_max_age(tmp_path):
