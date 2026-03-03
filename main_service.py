@@ -44,6 +44,7 @@ def _build_history_query_sequence():
         (0x13, bytes([0x02])),
         (0x13, bytes([0x03])),
         (0x13, bytes([0x04])),
+        (0x13, bytes([0x05])),
         (0x14, bytes([0x00])),
         (0x15, bytes([0x00])),
         (0x15, bytes([0x01])),
@@ -60,7 +61,7 @@ def _build_history_query_sequence():
 
     # Indexed history windows, likely required for month/day breakdown pages.
     for idx in range(HISTORY_INDEX_MAX + 1):
-        for qtype in (0x00, 0x01, 0x02, 0x03, 0x04):
+        for qtype in (0x00, 0x01, 0x02, 0x03, 0x04, 0x05):
             for destination in history_targets:
                 sequence.append((destination, 0x13, bytes([qtype, idx])))
         for qtype in (0x00, 0x01):
@@ -162,9 +163,10 @@ def main():
             if msg.name in HISTORY_MESSAGE_NAMES:
                 if msg.raw_telegram is not None:
                     resp_len = len(msg.raw_telegram.response_data or b"")
+                    resp_hex = (msg.raw_telegram.response_data or b"").hex()
                     if resp_len > 0:
                         logger.info(
-                            f"History response {msg.name} src=0x{msg.source:02X} dst=0x{msg.destination:02X} q={msg.raw_telegram.data.hex()} resp_len={resp_len}"
+                            f"History response {msg.name} src=0x{msg.source:02X} dst=0x{msg.destination:02X} q={msg.raw_telegram.data.hex()} resp_len={resp_len} resp_hex={resp_hex}"
                         )
                     else:
                         logger.info(
