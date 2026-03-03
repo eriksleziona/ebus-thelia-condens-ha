@@ -20,26 +20,61 @@ STATUS_STALE_THRESHOLD_SECONDS = 120.0
 PUBLISH_INTERVAL_SECONDS = 5
 STATUS_POLL_INTERVAL_SECONDS = 60
 MODULATION_POLL_INTERVAL_SECONDS = 75
-HISTORY_POLL_INTERVAL_SECONDS = 180
+HISTORY_POLL_INTERVAL_SECONDS = 15
 
 POLL_SOURCE_ADDR = 0x30
 POLL_DEST_ADDR = 0x08
 STATUS_QUERY_TYPE_0 = bytes([0x00])  # B511/00: status, pressure, flags
 STATUS_QUERY_TYPE_2 = bytes([0x02])  # B511/02: modulation/setpoints
-HISTORY_QUERY_SEQUENCE = (
-    (0x13, 0x00),  # B513 q0
-    (0x13, 0x01),  # B513 q1
-    (0x13, 0x02),  # B513 q2
-    (0x13, 0x03),  # B513 q3
-    (0x13, 0x04),  # B513 q4
-    (0x14, 0x00),  # B514 q0
-    (0x15, 0x00),  # B515 q0
-    (0x15, 0x01),  # B515 q1
-    (0x17, 0x00),  # B517 q0
-    (0x18, 0x00),  # B518 q0
-    (0x19, 0x00),  # B519 q0
-    (0x1A, 0x00),  # B51A q0
-)
+HISTORY_INDEX_MAX = 12
+
+
+def _build_history_query_sequence():
+    """
+    Build a mixed query list:
+    - direct single-byte query types
+    - indexed two-byte variants (query_type + index) for month/day buckets.
+    """
+    sequence = []
+
+    # Single-byte baseline queries.
+    sequence.extend(
+        [
+            (0x13, bytes([0x00])),
+            (0x13, bytes([0x01])),
+            (0x13, bytes([0x02])),
+            (0x13, bytes([0x03])),
+            (0x13, bytes([0x04])),
+            (0x14, bytes([0x00])),
+            (0x15, bytes([0x00])),
+            (0x15, bytes([0x01])),
+            (0x17, bytes([0x00])),
+            (0x18, bytes([0x00])),
+            (0x19, bytes([0x00])),
+            (0x1A, bytes([0x00])),
+        ]
+    )
+
+    # Indexed history windows, likely required for month/day breakdown pages.
+    for idx in range(HISTORY_INDEX_MAX + 1):
+        for qtype in (0x00, 0x01, 0x02, 0x03, 0x04):
+            sequence.append((0x13, bytes([qtype, idx])))
+        for qtype in (0x00, 0x01):
+            sequence.append((0x15, bytes([qtype, idx])))
+
+    return tuple(sequence)
+
+
+HISTORY_QUERY_SEQUENCE = _build_history_query_sequence()
+HISTORY_MESSAGE_NAMES = {
+    "history_stats",
+    "history_programs",
+    "error_history",
+    "history_stats_ext_17",
+    "history_stats_ext_18",
+    "history_stats_ext_19",
+    "history_stats_ext_1a",
+}
 
 
 logging.basicConfig(
@@ -118,6 +153,12 @@ def main():
                     mqtt_client.publish_sensors(sensors)
                 last_publish = now
 
+            # Push history data immediately when new historical block is received.
+            if msg.name in HISTORY_MESSAGE_NAMES:
+                if sensors:
+                    mqtt_client.publish_sensors(sensors)
+                last_publish = now
+
             if now - last_publish >= PUBLISH_INTERVAL_SECONDS:
                 if sensors:
                     mqtt_client.publish_sensors(sensors)
@@ -170,17 +211,17 @@ def main():
                     last_modulation_poll = now
 
             if HISTORY_QUERY_SEQUENCE and (now - last_history_poll) >= HISTORY_POLL_INTERVAL_SECONDS:
-                secondary_command, query_type = HISTORY_QUERY_SEQUENCE[history_query_index % len(HISTORY_QUERY_SEQUENCE)]
+                secondary_command, payload = HISTORY_QUERY_SEQUENCE[history_query_index % len(HISTORY_QUERY_SEQUENCE)]
                 if connection.send_query(
                     source=POLL_SOURCE_ADDR,
                     destination=POLL_DEST_ADDR,
                     primary_command=0xB5,
                     secondary_command=secondary_command,
-                    data=bytes([query_type]),
+                    data=payload,
                     prepend_sync=True,
                     append_sync=True,
                 ):
-                    logger.info(f"Sent history poll B5{secondary_command:02X}/{query_type:02X}")
+                    logger.info(f"Sent history poll B5{secondary_command:02X} payload={payload.hex()}")
                     last_history_poll = now
                     history_query_index += 1
 

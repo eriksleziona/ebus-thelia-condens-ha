@@ -433,11 +433,42 @@ class DataAggregator:
         timestamp: datetime,
         label: str,
         query_type: Optional[int] = None,
+        query_hex: Optional[str] = None,
     ) -> None:
         if query_type is not None:
-            self._set_sensor(f"{sensor_prefix}_query_type", query_type, "", timestamp, f"{label} query type")
-        self._set_sensor(f"{sensor_prefix}_response_len", len(response), "B", timestamp, f"{label} response length")
-        self._set_sensor(f"{sensor_prefix}_raw_hex", response.hex(), "", timestamp, f"{label} raw payload")
+            self._set_sensor(
+                f"{sensor_prefix}_query_type",
+                query_type,
+                "",
+                timestamp,
+                f"{label} query type",
+                persistent=True,
+            )
+        if query_hex:
+            self._set_sensor(
+                f"{sensor_prefix}_query_hex",
+                query_hex,
+                "",
+                timestamp,
+                f"{label} query payload",
+                persistent=True,
+            )
+        self._set_sensor(
+            f"{sensor_prefix}_response_len",
+            len(response),
+            "B",
+            timestamp,
+            f"{label} response length",
+            persistent=True,
+        )
+        self._set_sensor(
+            f"{sensor_prefix}_raw_hex",
+            response.hex(),
+            "",
+            timestamp,
+            f"{label} raw payload",
+            persistent=True,
+        )
 
         u16_candidates: List[str] = []
         for offset in range(0, len(response) - 1, 2):
@@ -457,6 +488,7 @@ class DataAggregator:
             "",
             timestamp,
             f"{label} non-empty uint16 values",
+            persistent=True,
         )
         self._set_sensor(
             f"{sensor_prefix}_u32_candidates",
@@ -464,6 +496,7 @@ class DataAggregator:
             "",
             timestamp,
             f"{label} non-empty uint32 values",
+            persistent=True,
         )
 
     def _extract_sensors(self, msg: ParsedMessage, telegram: EbusTelegram) -> None:
@@ -605,18 +638,26 @@ class DataAggregator:
             "history_stats_ext_1a",
         ):
             query_type: Optional[int] = data[0] if len(data) >= 1 else None
+            query_hex = data.hex() if len(data) >= 1 else ""
             if not resp:
                 return
 
             command_suffix = telegram.secondary_command
             base_prefix = f"history.b5{command_suffix:02x}"
             sensor_prefix = base_prefix
-            if query_type is not None:
-                sensor_prefix = f"{base_prefix}.q{query_type:02x}"
+            if query_hex:
+                sensor_prefix = f"{base_prefix}.q{query_hex}"
             label = f"B5{command_suffix:02X}"
 
             # Keep raw payload and compact candidate lists for reverse engineering.
-            self._publish_history_candidates(sensor_prefix, resp, ts, label, query_type=query_type)
+            self._publish_history_candidates(
+                sensor_prefix,
+                resp,
+                ts,
+                label,
+                query_type=query_type,
+                query_hex=query_hex,
+            )
 
             # Expose first words/dwords as explicit sensors for charting in HA.
             for offset in range(0, min(len(resp) - 1, 8), 2):
@@ -628,6 +669,7 @@ class DataAggregator:
                         "",
                         ts,
                         f"{label} uint16[{offset}]",
+                        persistent=True,
                     )
 
             for offset in range(0, min(len(resp) - 3, 16), 4):
@@ -639,11 +681,13 @@ class DataAggregator:
                         "",
                         ts,
                         f"{label} uint32[{offset}]",
+                        persistent=True,
                     )
 
     def _set_sensor(self, name: str, value: Any, unit: str,
                    timestamp: datetime, description: str = "",
-                   min_v: float = None, max_v: float = None) -> None:
+                   min_v: float = None, max_v: float = None,
+                   persistent: bool = False) -> None:
 
         # Apply Sanity Checks
         if isinstance(value, (int, float)) and not isinstance(value, bool):
@@ -657,12 +701,15 @@ class DataAggregator:
             "unit": unit,
             "timestamp": timestamp,
             "description": description,
+            "persistent": bool(persistent),
         }
 
     def get_sensor(self, name: str) -> Optional[Any]:
         if name not in self._sensors:
             return None
         data = self._sensors[name]
+        if data.get("persistent"):
+            return data["value"]
         age = (datetime.now() - data["timestamp"]).total_seconds()
         if age > self.max_age:
             return None
@@ -674,7 +721,7 @@ class DataAggregator:
         now = datetime.now()
         for name, data in self._sensors.items():
             age = (now - data["timestamp"]).total_seconds()
-            if age <= self.max_age:
+            if age <= self.max_age or data.get("persistent"):
                 result[name] = {
                     "value": data["value"],
                     "unit": data["unit"],
