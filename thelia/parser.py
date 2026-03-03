@@ -594,6 +594,53 @@ class DataAggregator:
                 if len(resp) >= 1 and resp[0] != 0xFF:
                     self._set_modulation(resp[0], ts, "B509_R0", raw_byte=resp[0])
 
+        # === B513/B514/B515/B517-B51A: Historical counters/logs ===
+        elif msg.name in (
+            "history_stats",
+            "history_programs",
+            "error_history",
+            "history_stats_ext_17",
+            "history_stats_ext_18",
+            "history_stats_ext_19",
+            "history_stats_ext_1a",
+        ):
+            query_type: Optional[int] = data[0] if len(data) >= 1 else None
+            if not resp:
+                return
+
+            command_suffix = telegram.secondary_command
+            base_prefix = f"history.b5{command_suffix:02x}"
+            sensor_prefix = base_prefix
+            if query_type is not None:
+                sensor_prefix = f"{base_prefix}.q{query_type:02x}"
+            label = f"B5{command_suffix:02X}"
+
+            # Keep raw payload and compact candidate lists for reverse engineering.
+            self._publish_history_candidates(sensor_prefix, resp, ts, label, query_type=query_type)
+
+            # Expose first words/dwords as explicit sensors for charting in HA.
+            for offset in range(0, min(len(resp) - 1, 8), 2):
+                value_u16 = int.from_bytes(resp[offset:offset + 2], "little")
+                if value_u16 not in (0x0000, 0xFFFF):
+                    self._set_sensor(
+                        f"{sensor_prefix}_u16_{offset}",
+                        value_u16,
+                        "",
+                        ts,
+                        f"{label} uint16[{offset}]",
+                    )
+
+            for offset in range(0, min(len(resp) - 3, 16), 4):
+                value_u32 = int.from_bytes(resp[offset:offset + 4], "little")
+                if value_u32 not in (0x00000000, 0xFFFFFFFF):
+                    self._set_sensor(
+                        f"{sensor_prefix}_u32_{offset}",
+                        value_u32,
+                        "",
+                        ts,
+                        f"{label} uint32[{offset}]",
+                    )
+
     def _set_sensor(self, name: str, value: Any, unit: str,
                    timestamp: datetime, description: str = "",
                    min_v: float = None, max_v: float = None) -> None:

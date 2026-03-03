@@ -2,7 +2,6 @@
 import logging
 import sys
 import time
-from typing import Any, Dict, Optional
 
 from ebus_core.connection import ConnectionConfig, SerialConnection
 from thelia.mqtt import HAMqttClient
@@ -21,11 +20,26 @@ STATUS_STALE_THRESHOLD_SECONDS = 120.0
 PUBLISH_INTERVAL_SECONDS = 5
 STATUS_POLL_INTERVAL_SECONDS = 60
 MODULATION_POLL_INTERVAL_SECONDS = 75
+HISTORY_POLL_INTERVAL_SECONDS = 180
 
 POLL_SOURCE_ADDR = 0x30
 POLL_DEST_ADDR = 0x08
 STATUS_QUERY_TYPE_0 = bytes([0x00])  # B511/00: status, pressure, flags
 STATUS_QUERY_TYPE_2 = bytes([0x02])  # B511/02: modulation/setpoints
+HISTORY_QUERY_SEQUENCE = (
+    (0x13, 0x00),  # B513 q0
+    (0x13, 0x01),  # B513 q1
+    (0x13, 0x02),  # B513 q2
+    (0x13, 0x03),  # B513 q3
+    (0x13, 0x04),  # B513 q4
+    (0x14, 0x00),  # B514 q0
+    (0x15, 0x00),  # B515 q0
+    (0x15, 0x01),  # B515 q1
+    (0x17, 0x00),  # B517 q0
+    (0x18, 0x00),  # B518 q0
+    (0x19, 0x00),  # B519 q0
+    (0x1A, 0x00),  # B51A q0
+)
 
 
 logging.basicConfig(
@@ -39,54 +53,6 @@ def _sensor_value(sensors: dict, key: str):
     if key not in sensors:
         return None
     return sensors[key].get("value")
-
-
-def _metric(value: Any, unit: str = "", description: str = "") -> Dict[str, Any]:
-    return {
-        "value": value,
-        "unit": unit,
-        "age_seconds": 0.0,
-        "description": description,
-    }
-
-
-def _build_bridge_stats(
-    parser: TheliaParser,
-    poll_status_sent: int,
-    poll_modulation_sent: int,
-    poll_status_received: int,
-    poll_modulation_received: int,
-    last_status_poll_at: Optional[str],
-    last_modulation_poll_at: Optional[str],
-    last_status_reply_at: Optional[str],
-    last_modulation_reply_at: Optional[str],
-) -> Dict[str, Dict[str, Any]]:
-    stats = parser.get_stats()
-    total = int(stats.get("total", 0))
-    parsed = int(stats.get("parsed", 0))
-    unknown = int(stats.get("unknown", 0))
-    parse_ratio_pct = round((parsed * 100.0 / total), 1) if total > 0 else 0.0
-
-    return {
-        "bridge.telegrams_total": _metric(total, "", "Total telegrams seen"),
-        "bridge.telegrams_parsed": _metric(parsed, "", "Parsed telegrams"),
-        "bridge.telegrams_unknown": _metric(unknown, "", "Unknown telegrams"),
-        "bridge.parse_ratio_pct": _metric(parse_ratio_pct, "%", "Parse success ratio"),
-        "bridge.poll_b511_q0_sent": _metric(poll_status_sent, "", "Active polls B511/00 sent"),
-        "bridge.poll_b511_q2_sent": _metric(poll_modulation_sent, "", "Active polls B511/02 sent"),
-        "bridge.poll_b511_q0_received": _metric(poll_status_received, "", "Responses B511/00 received"),
-        "bridge.poll_b511_q2_received": _metric(poll_modulation_received, "", "Responses B511/02 received"),
-        "bridge.poll_b511_q0_last_sent_at": _metric(last_status_poll_at or "", "", "Last B511/00 poll sent timestamp"),
-        "bridge.poll_b511_q2_last_sent_at": _metric(last_modulation_poll_at or "", "", "Last B511/02 poll sent timestamp"),
-        "bridge.poll_b511_q0_last_received_at": _metric(last_status_reply_at or "", "", "Last B511/00 response timestamp"),
-        "bridge.poll_b511_q2_last_received_at": _metric(last_modulation_reply_at or "", "", "Last B511/02 response timestamp"),
-    }
-
-
-def _compose_publish_payload(base_sensors: Dict[str, Dict[str, Any]], bridge_stats: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
-    payload = dict(base_sensors)
-    payload.update(bridge_stats)
-    return payload
 
 
 def main():
@@ -117,53 +83,19 @@ def main():
     last_publish = 0.0
     last_status_poll = 0.0
     last_modulation_poll = 0.0
-    poll_status_sent = 0
-    poll_modulation_sent = 0
-    poll_status_received = 0
-    poll_modulation_received = 0
-    last_status_poll_at = None
-    last_modulation_poll_at = None
-    last_status_reply_at = None
-    last_modulation_reply_at = None
+    last_history_poll = 0.0
+    history_query_index = 0
 
     try:
         for telegram in connection.telegram_generator():
             msg = parser.parse(telegram)
             now = time.time()
-
-            if (
-                msg.name == "status_temps"
-                and msg.source == POLL_SOURCE_ADDR
-                and msg.destination == POLL_DEST_ADDR
-                and msg.raw_telegram is not None
-                and msg.raw_telegram.response_data
-            ):
-                query_type = msg.query_data.get("query_type")
-                if query_type == 0:
-                    poll_status_received += 1
-                    last_status_reply_at = msg.timestamp.isoformat(timespec="seconds")
-                elif query_type == 2:
-                    poll_modulation_received += 1
-                    last_modulation_reply_at = msg.timestamp.isoformat(timespec="seconds")
-
-            base_sensors = aggregator.get_all_sensors()
-            bridge_stats = _build_bridge_stats(
-                parser=parser,
-                poll_status_sent=poll_status_sent,
-                poll_modulation_sent=poll_modulation_sent,
-                poll_status_received=poll_status_received,
-                poll_modulation_received=poll_modulation_received,
-                last_status_poll_at=last_status_poll_at,
-                last_modulation_poll_at=last_modulation_poll_at,
-                last_status_reply_at=last_status_reply_at,
-                last_modulation_reply_at=last_modulation_reply_at,
-            )
-            publish_payload = _compose_publish_payload(base_sensors, bridge_stats)
+            sensors = aggregator.get_all_sensors()
 
             # Instant feedback for parameter writes.
             if msg.name == "param_write":
-                if publish_payload:
-                    mqtt_client.publish_sensors(publish_payload)
+                if sensors:
+                    mqtt_client.publish_sensors(sensors)
                 last_publish = now
 
             # Natural updates reset poll cooldowns.
@@ -182,18 +114,18 @@ def main():
                 or msg.name == "modulation_outdoor"
                 or (msg.name == "room_temp" and msg.source == 0x08)
             ):
-                if publish_payload:
-                    mqtt_client.publish_sensors(publish_payload)
+                if sensors:
+                    mqtt_client.publish_sensors(sensors)
                 last_publish = now
 
             if now - last_publish >= PUBLISH_INTERVAL_SECONDS:
-                if publish_payload:
-                    mqtt_client.publish_sensors(publish_payload)
+                if sensors:
+                    mqtt_client.publish_sensors(sensors)
                 last_publish = now
 
-            status_age_s = _sensor_value(base_sensors, "boiler.status_last_update_s")
-            modulation_age_s = _sensor_value(base_sensors, "boiler.modulation_last_update_s")
-            status_stale = bool(_sensor_value(base_sensors, "boiler.status_stale"))
+            status_age_s = _sensor_value(sensors, "boiler.status_last_update_s")
+            modulation_age_s = _sensor_value(sensors, "boiler.modulation_last_update_s")
+            status_stale = bool(_sensor_value(sensors, "boiler.status_stale"))
 
             should_poll_status = (
                 status_stale
@@ -223,8 +155,6 @@ def main():
                 ):
                     logger.info("Sent active poll B511/00")
                     last_status_poll = now
-                    poll_status_sent += 1
-                    last_status_poll_at = msg.timestamp.isoformat(timespec="seconds")
 
             if should_poll_modulation and (now - last_modulation_poll) >= MODULATION_POLL_INTERVAL_SECONDS:
                 if connection.send_query(
@@ -238,8 +168,21 @@ def main():
                 ):
                     logger.info("Sent active poll B511/02")
                     last_modulation_poll = now
-                    poll_modulation_sent += 1
-                    last_modulation_poll_at = msg.timestamp.isoformat(timespec="seconds")
+
+            if HISTORY_QUERY_SEQUENCE and (now - last_history_poll) >= HISTORY_POLL_INTERVAL_SECONDS:
+                secondary_command, query_type = HISTORY_QUERY_SEQUENCE[history_query_index % len(HISTORY_QUERY_SEQUENCE)]
+                if connection.send_query(
+                    source=POLL_SOURCE_ADDR,
+                    destination=POLL_DEST_ADDR,
+                    primary_command=0xB5,
+                    secondary_command=secondary_command,
+                    data=bytes([query_type]),
+                    prepend_sync=True,
+                    append_sync=True,
+                ):
+                    logger.info(f"Sent history poll B5{secondary_command:02X}/{query_type:02X}")
+                    last_history_poll = now
+                    history_query_index += 1
 
     except KeyboardInterrupt:
         logger.info("Stopping...")

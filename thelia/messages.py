@@ -300,6 +300,26 @@ register_message(MessageDefinition(
     ]
 ))
 
+
+def _register_generic_history_command(name: str, secondary_command: int, description: str) -> None:
+    register_message(MessageDefinition(
+        name=name,
+        primary_command=0xB5,
+        secondary_command=secondary_command,
+        description=description,
+        fields=[
+            FieldDefinition("query_type", 0, DataType.UINT8, ignore_invalid=False),
+        ],
+        response_fields=[],
+    ))
+
+
+_register_generic_history_command("history_programs", 0x14, "Schedules/programs (generic)")
+_register_generic_history_command("history_stats_ext_17", 0x17, "Extended statistics block 0x17 (generic)")
+_register_generic_history_command("history_stats_ext_18", 0x18, "Extended statistics block 0x18 (generic)")
+_register_generic_history_command("history_stats_ext_19", 0x19, "Extended statistics block 0x19 (generic)")
+_register_generic_history_command("history_stats_ext_1a", 0x1A, "Extended statistics block 0x1A (generic)")
+
 # B509: Room Temperature
 register_message(MessageDefinition(
     name="room_temp",
