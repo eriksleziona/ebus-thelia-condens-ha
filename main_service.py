@@ -139,7 +139,7 @@ def main():
                     prepend_sync=True,
                     append_sync=True,
                 ):
-                    logger.debug("Sent active poll B511/00")
+                    logger.info("Sent active poll B511/00")
                     last_status_poll = now
 
             if should_poll_modulation and (now - last_modulation_poll) >= MODULATION_POLL_INTERVAL_SECONDS:
@@ -152,7 +152,7 @@ def main():
                     prepend_sync=True,
                     append_sync=True,
                 ):
-                    logger.debug("Sent active poll B511/02")
+                    logger.info("Sent active poll B511/02")
                     last_modulation_poll = now
 
     except KeyboardInterrupt:
