@@ -1,6 +1,5 @@
 """
-Thelia Condens + MiPro Controller message definitions.
-FIXED VERSION: Corrects B504 Outdoor Temp offset and includes all necessary bytes.
+Thelia Condens boiler message definitions.
 """
 
 from dataclasses import dataclass, field
@@ -234,7 +233,7 @@ register_message(MessageDefinition(
     name="param_write",
     primary_command=0xB5,
     secondary_command=0x12,
-    description="Parameter write from MiPro",
+    description="Parameter write from controller",
     fields=[
         FieldDefinition("param_id", 0, DataType.UINT8),
         FieldDefinition("value_raw", 1, DataType.UINT8),
@@ -242,90 +241,12 @@ register_message(MessageDefinition(
     response_fields=[]
 ))
 
-# B513: History/Statistics (best-effort generic decoding)
-register_message(MessageDefinition(
-    name="history_stats",
-    primary_command=0xB5,
-    secondary_command=0x13,
-    description="Historical statistics and counters (generic)",
-    fields=[
-        FieldDefinition("query_type", 0, DataType.UINT8, ignore_invalid=False),
-    ],
-    response_fields=[
-        FieldDefinition("byte0", 0, DataType.UINT8, ignore_invalid=False),
-        FieldDefinition("byte1", 1, DataType.UINT8, ignore_invalid=False),
-        FieldDefinition("byte2", 2, DataType.UINT8, ignore_invalid=False),
-        FieldDefinition("byte3", 3, DataType.UINT8, ignore_invalid=False),
-        FieldDefinition("byte4", 4, DataType.UINT8, ignore_invalid=False),
-        FieldDefinition("byte5", 5, DataType.UINT8, ignore_invalid=False),
-        FieldDefinition("byte6", 6, DataType.UINT8, ignore_invalid=False),
-        FieldDefinition("byte7", 7, DataType.UINT8, ignore_invalid=False),
-        FieldDefinition("byte8", 8, DataType.UINT8, ignore_invalid=False),
-        FieldDefinition("byte9", 9, DataType.UINT8, ignore_invalid=False),
-        FieldDefinition("byte10", 10, DataType.UINT8, ignore_invalid=False),
-        FieldDefinition("byte11", 11, DataType.UINT8, ignore_invalid=False),
-        FieldDefinition("byte12", 12, DataType.UINT8, ignore_invalid=False),
-        FieldDefinition("byte13", 13, DataType.UINT8, ignore_invalid=False),
-        FieldDefinition("byte14", 14, DataType.UINT8, ignore_invalid=False),
-        FieldDefinition("byte15", 15, DataType.UINT8, ignore_invalid=False),
-    ]
-))
-
-# B515: Error/History (best-effort generic decoding)
-register_message(MessageDefinition(
-    name="error_history",
-    primary_command=0xB5,
-    secondary_command=0x15,
-    description="Error and history records (generic)",
-    fields=[
-        FieldDefinition("query_type", 0, DataType.UINT8, ignore_invalid=False),
-    ],
-    response_fields=[
-        FieldDefinition("byte0", 0, DataType.UINT8, ignore_invalid=False),
-        FieldDefinition("byte1", 1, DataType.UINT8, ignore_invalid=False),
-        FieldDefinition("byte2", 2, DataType.UINT8, ignore_invalid=False),
-        FieldDefinition("byte3", 3, DataType.UINT8, ignore_invalid=False),
-        FieldDefinition("byte4", 4, DataType.UINT8, ignore_invalid=False),
-        FieldDefinition("byte5", 5, DataType.UINT8, ignore_invalid=False),
-        FieldDefinition("byte6", 6, DataType.UINT8, ignore_invalid=False),
-        FieldDefinition("byte7", 7, DataType.UINT8, ignore_invalid=False),
-        FieldDefinition("byte8", 8, DataType.UINT8, ignore_invalid=False),
-        FieldDefinition("byte9", 9, DataType.UINT8, ignore_invalid=False),
-        FieldDefinition("byte10", 10, DataType.UINT8, ignore_invalid=False),
-        FieldDefinition("byte11", 11, DataType.UINT8, ignore_invalid=False),
-        FieldDefinition("byte12", 12, DataType.UINT8, ignore_invalid=False),
-        FieldDefinition("byte13", 13, DataType.UINT8, ignore_invalid=False),
-        FieldDefinition("byte14", 14, DataType.UINT8, ignore_invalid=False),
-        FieldDefinition("byte15", 15, DataType.UINT8, ignore_invalid=False),
-    ]
-))
-
-
-def _register_generic_history_command(name: str, secondary_command: int, description: str) -> None:
-    register_message(MessageDefinition(
-        name=name,
-        primary_command=0xB5,
-        secondary_command=secondary_command,
-        description=description,
-        fields=[
-            FieldDefinition("query_type", 0, DataType.UINT8, ignore_invalid=False),
-        ],
-        response_fields=[],
-    ))
-
-
-_register_generic_history_command("history_programs", 0x14, "Schedules/programs (generic)")
-_register_generic_history_command("history_stats_ext_17", 0x17, "Extended statistics block 0x17 (generic)")
-_register_generic_history_command("history_stats_ext_18", 0x18, "Extended statistics block 0x18 (generic)")
-_register_generic_history_command("history_stats_ext_19", 0x19, "Extended statistics block 0x19 (generic)")
-_register_generic_history_command("history_stats_ext_1a", 0x1A, "Extended statistics block 0x1A (generic)")
-
 # B509: Room Temperature
 register_message(MessageDefinition(
     name="room_temp",
     primary_command=0xB5,
     secondary_command=0x09,
-    description="Room temperature from MiPro",
+    description="Room temperature from controller",
     fields=[
         FieldDefinition("room_temp", 0, DataType.DATA1C, unit="°C"),
         FieldDefinition("room_setpoint_adjust", 1, DataType.INT8),

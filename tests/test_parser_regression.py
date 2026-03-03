@@ -73,18 +73,6 @@ def _msg_b504(ts: datetime, resp: bytes):
     )
 
 
-def _msg_history(ts: datetime, name: str, secondary: int, query_data: bytes, resp: bytes):
-    return _make_message(
-        name=name,
-        data=query_data,
-        resp=resp,
-        ts=ts,
-        primary=0xB5,
-        secondary=secondary,
-        query_data={"query_type": query_data[0] if query_data else None},
-    )
-
-
 def test_b511_q2_modulation_for_variable_response_length(tmp_path):
     aggregator = DataAggregator(state_file=str(tmp_path / "runtime_state.json"), flame_debounce_seconds=0)
     now = datetime.now()
@@ -167,71 +155,10 @@ def test_b504_live_modulation_has_priority_over_b511_q2(tmp_path):
     assert aggregator.get_sensor("boiler.modulation_source") == "B504_B0"
     assert aggregator.get_sensor("boiler.burner_modulation_q2") == 35
 
-
-def test_history_stats_are_exposed_as_candidate_sensors(tmp_path):
+def test_modulation_publishes_burner_power_alias(tmp_path):
     aggregator = DataAggregator(state_file=str(tmp_path / "runtime_state.json"), flame_debounce_seconds=0)
     now = datetime.now()
 
-    # q0 response with two non-empty words and one non-empty dword.
-    resp_q0 = bytes([0x34, 0x12, 0x78, 0x56, 0x00, 0x00, 0xFF, 0xFF])
-    aggregator.update(_msg_history(now, "history_stats", 0x13, bytes([0x00]), resp_q0))
-
-    sensors = aggregator.get_all_sensors()
-    assert sensors["history.b513.q00_response_len"]["value"] == 8
-    assert sensors["history.b513.q00_query_hex"]["value"] == "00"
-    assert sensors["history.b513.q00_u16_0"]["value"] == 0x1234
-    assert sensors["history.b513.q00_u16_2"]["value"] == 0x5678
-    assert sensors["history.b513.q00_u32_0"]["value"] == 0x56781234
-    assert sensors["history.b513.q00_kwh_guess_div10_0"]["value"] == round(0x56781234 / 10.0, 1)
-    assert sensors["history.b513.q00_kwh_guess_div100_0"]["value"] == round(0x56781234 / 100.0, 2)
-
-    # q1 should write into a separate namespace.
-    resp_q1 = bytes([0x05, 0x00, 0x00, 0x00])
-    aggregator.update(_msg_history(now + timedelta(seconds=1), "error_history", 0x15, bytes([0x01]), resp_q1))
-    sensors = aggregator.get_all_sensors()
-    assert sensors["history.b515.q01_response_len"]["value"] == 4
-    assert sensors["history.b515.q01_u16_0"]["value"] == 5
-
-    # Two-byte indexed query should produce a unique namespace per index.
-    resp_q0_i2 = bytes([0x10, 0x27, 0x00, 0x00])
-    aggregator.update(_msg_history(now + timedelta(seconds=2), "history_stats", 0x13, bytes([0x00, 0x02]), resp_q0_i2))
-    sensors = aggregator.get_all_sensors()
-    assert sensors["history.b513.q0002_response_len"]["value"] == 4
-    assert sensors["history.b513.q0002_u16_0"]["value"] == 10000
-    assert sensors["history.b513.q0002_kwh_guess_u16_div10_0"]["value"] == 1000.0
-
-
-def test_history_sensors_persist_beyond_max_age(tmp_path):
-    aggregator = DataAggregator(
-        max_age=1.0,
-        state_file=str(tmp_path / "runtime_state.json"),
-        flame_debounce_seconds=0,
-    )
-    old_ts = datetime.now() - timedelta(seconds=30)
-    aggregator.update(_msg_history(old_ts, "history_stats", 0x13, bytes([0x00]), bytes([0x34, 0x12])))
-
-    assert aggregator.get_sensor("history.b513.q00_u16_0") == 0x1234
-    sensors = aggregator.get_all_sensors()
-    assert "history.b513.q00_u16_0" in sensors
-
-
-def test_unknown_b5_with_response_is_published_as_history_candidates(tmp_path):
-    aggregator = DataAggregator(
-        state_file=str(tmp_path / "runtime_state.json"),
-        flame_debounce_seconds=0,
-    )
-    now = datetime.now()
-
-    msg = _make_message(
-        name="unknown",
-        data=bytes([0x09, 0x02]),
-        resp=bytes([0x34, 0x12, 0x00, 0x00]),
-        ts=now,
-        primary=0xB5,
-        secondary=0x77,
-    )
-    aggregator.update(msg)
-
-    sensors = aggregator.get_all_sensors()
-    assert sensors["history.unknown.b577.q0902_response_len"]["value"] == 4
-    assert sensors["history.unknown.b577.q0902_u16_0"]["value"] == 0x1234
+    aggregator.update(_msg_b504(now, bytes([42])))
+    assert aggregator.get_sensor("boiler.burner_modulation") == 42
+    assert aggregator.get_sensor("boiler.burner_power_percent") == 42

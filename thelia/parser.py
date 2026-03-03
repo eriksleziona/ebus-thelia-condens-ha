@@ -1,6 +1,5 @@
 """
-Thelia + MiPro parser with all sensors.
-FIXED VERSION: Handles Instant Writes, Pump Status, Ghost Data Filtering, and Room Temp Priority.
+Thelia boiler parser and sensor aggregator.
 """
 
 import logging
@@ -151,8 +150,7 @@ class TheliaParser:
 
 class DataAggregator:
     """
-    Aggregates sensor values for Thelia Condens + MiPro.
-    FIXED: Prioritizes B509 (Thermostat) for Room Temp and ignores B511 (Boiler) if 0.0.
+    Aggregates sensor values for Thelia Condens boiler.
     """
 
     def __init__(
@@ -200,48 +198,11 @@ class DataAggregator:
             return
 
         if message.name == "unknown":
-            self._extract_unknown_history_candidates(message, telegram)
             self._publish_runtime_metrics(message.timestamp)
             return
 
         self._extract_sensors(message, telegram)
         self._publish_runtime_metrics(message.timestamp)
-
-    def _extract_unknown_history_candidates(self, msg: ParsedMessage, telegram: EbusTelegram) -> None:
-        if telegram.primary_command != 0xB5:
-            return
-
-        ts = msg.timestamp
-        data = telegram.data or b""
-        resp = telegram.response_data or b""
-        if not resp:
-            return
-
-        query_type: Optional[int] = data[0] if len(data) >= 1 else None
-        query_hex = data.hex() if data else "none"
-        sensor_prefix = f"history.unknown.b5{telegram.secondary_command:02x}.q{query_hex}"
-        label = f"B5{telegram.secondary_command:02X} (unknown)"
-
-        self._publish_history_candidates(
-            sensor_prefix=sensor_prefix,
-            response=resp,
-            timestamp=ts,
-            label=label,
-            query_type=query_type,
-            query_hex=query_hex if data else None,
-        )
-
-        for offset in range(0, min(len(resp) - 1, 8), 2):
-            value_u16 = int.from_bytes(resp[offset:offset + 2], "little")
-            if value_u16 not in (0x0000, 0xFFFF):
-                self._set_sensor(
-                    f"{sensor_prefix}_u16_{offset}",
-                    value_u16,
-                    "",
-                    ts,
-                    f"{label} uint16[{offset}]",
-                    persistent=True,
-                )
 
     def _to_iso8601(self, ts: datetime) -> str:
         if ts.tzinfo is not None:
@@ -342,6 +303,7 @@ class DataAggregator:
         self._modulation_source = normalized_source
         self._modulation_raw_hex = f"0x{raw:02X}"
         self._set_sensor("boiler.burner_modulation", normalized, "%", timestamp, "Modulation", min_v=0, max_v=100)
+        self._set_sensor("boiler.burner_power_percent", normalized, "%", timestamp, "Burner power", min_v=0, max_v=100)
 
         # If status telegrams are stale/missing, infer flame from modulation.
         status_age_s: Optional[float] = None
@@ -467,79 +429,6 @@ class DataAggregator:
 
         self._publish_flame_metrics(timestamp)
 
-    def _publish_history_candidates(
-        self,
-        sensor_prefix: str,
-        response: bytes,
-        timestamp: datetime,
-        label: str,
-        query_type: Optional[int] = None,
-        query_hex: Optional[str] = None,
-    ) -> None:
-        if query_type is not None:
-            self._set_sensor(
-                f"{sensor_prefix}_query_type",
-                query_type,
-                "",
-                timestamp,
-                f"{label} query type",
-                persistent=True,
-            )
-        if query_hex:
-            self._set_sensor(
-                f"{sensor_prefix}_query_hex",
-                query_hex,
-                "",
-                timestamp,
-                f"{label} query payload",
-                persistent=True,
-            )
-        self._set_sensor(
-            f"{sensor_prefix}_response_len",
-            len(response),
-            "B",
-            timestamp,
-            f"{label} response length",
-            persistent=True,
-        )
-        self._set_sensor(
-            f"{sensor_prefix}_raw_hex",
-            response.hex(),
-            "",
-            timestamp,
-            f"{label} raw payload",
-            persistent=True,
-        )
-
-        u16_candidates: List[str] = []
-        for offset in range(0, len(response) - 1, 2):
-            value = int.from_bytes(response[offset:offset + 2], "little")
-            if value not in (0x0000, 0xFFFF):
-                u16_candidates.append(f"{offset}:{value}")
-
-        u32_candidates: List[str] = []
-        for offset in range(0, len(response) - 3, 4):
-            value = int.from_bytes(response[offset:offset + 4], "little")
-            if value not in (0x00000000, 0xFFFFFFFF):
-                u32_candidates.append(f"{offset}:{value}")
-
-        self._set_sensor(
-            f"{sensor_prefix}_u16_candidates",
-            ",".join(u16_candidates) if u16_candidates else "none",
-            "",
-            timestamp,
-            f"{label} non-empty uint16 values",
-            persistent=True,
-        )
-        self._set_sensor(
-            f"{sensor_prefix}_u32_candidates",
-            ",".join(u32_candidates) if u32_candidates else "none",
-            "",
-            timestamp,
-            f"{label} non-empty uint32 values",
-            persistent=True,
-        )
-
     def _extract_sensors(self, msg: ParsedMessage, telegram: EbusTelegram) -> None:
         ts = msg.timestamp
         data = telegram.data or b''
@@ -574,13 +463,19 @@ class DataAggregator:
                     delta = flow_val - ret_val
                     self._set_sensor("boiler.delta_t", round(delta, 1), "°C", ts, "Flow-Return Delta")
 
+                # Raw bytes for reverse engineering (e.g. fan-speed mapping).
+                if len(resp) >= 4 and resp[3] != 0xFF:
+                    self._set_sensor("boiler.b511_q1_byte3_raw", resp[3], "", ts, "Raw B511/Q1 byte 3")
+                if len(resp) >= 5 and resp[4] != 0xFF:
+                    self._set_sensor("boiler.b511_q1_byte4_raw", resp[4], "", ts, "Raw B511/Q1 byte 4")
+
             elif query_type == 0 and len(resp) >= 8:
                 # Type 0: Status/Pressure/State
                 self._last_status_at = ts
 
                 # --- FIX: Only accept Room Temp from Boiler if > 1.0 (Ignores 0.0) ---
                 if resp[3] != 0xFF:
-                    self._set_sensor("mipro.room_temperature", resp[3] / 2.0, "°C", ts,
+                    self._set_sensor("boiler.room_temperature", resp[3] / 2.0, "°C", ts,
                                    "Room Temperature (Boiler Reading)", min_v=1.0, max_v=40.0)
 
                 # Pump Status (from State Code Byte 4)
@@ -591,6 +486,7 @@ class DataAggregator:
                     # S.02-S.08 = Heating (Pump Running)
                     # S.10-S.17 = DHW (Pump Running)
                     pump_running = state_code in [2, 3, 4, 5, 6, 7, 8, 10, 14, 17]
+                    self._set_sensor("boiler.state_code", state_code, "", ts, "Boiler state code (S.xx)")
                     self._set_sensor("boiler.pump_status", pump_running, "", ts, f"Pump State (S.{state_code:02d})")
 
                 # SANITY CHECK: Water Pressure (0.0 to 3.5 bar)
@@ -622,10 +518,10 @@ class DataAggregator:
 
                 if len(resp) >= 2 and resp[1] != 0xFF:
                     self._set_sensor("boiler.outdoor_cutoff_internal", resp[1], "°C", ts,
-                                   "Boiler Internal Cutoff (Ignored by MiPro)")
+                                   "Boiler Internal Cutoff (ignored by controller)")
 
                 if len(resp) >= 3 and resp[2] != 0xFF:
-                    self._set_sensor("mipro.max_flow_temp", resp[2] / 2.0, "°C", ts, "Max Flow Limit")
+                    self._set_sensor("boiler.max_flow_temp_limit", resp[2] / 2.0, "°C", ts, "Max Flow Limit")
 
                 if len(resp) >= 4 and resp[3] != 0xFF:
                     self._set_sensor("boiler.dhw_setpoint_local", resp[3] / 2.0, "°C", ts, "Boiler Dial Setpoint")
@@ -633,7 +529,10 @@ class DataAggregator:
                 if len(resp) >= 6 and resp[5] != 0xFF:
                     val = resp[5] / 2.0
                     if 30 <= val <= 75:
-                        self._set_sensor("mipro.dhw_setpoint", val, "°C", ts, "DHW Setpoint (Active)")
+                        self._set_sensor("boiler.dhw_setpoint_active", val, "°C", ts, "DHW Setpoint (Active)")
+
+                if len(resp) >= 5 and resp[4] != 0xFF:
+                    self._set_sensor("boiler.b511_q2_byte4_raw", resp[4], "", ts, "Raw B511/Q2 byte 4")
 
         # === B512: INSTANT WRITE COMMAND ===
         elif msg.name == "param_write" and len(data) >= 2:
@@ -642,7 +541,7 @@ class DataAggregator:
             if param_id == 0x00:
                 dhw_new = val_raw / 2.0
                 if 30 <= dhw_new <= 75:
-                    self._set_sensor("mipro.dhw_setpoint", dhw_new, "°C", ts, "DHW Setpoint (Instant Write)")
+                    self._set_sensor("boiler.dhw_setpoint_active", dhw_new, "°C", ts, "DHW Setpoint (Instant Write)")
 
         # === B504: Outdoor ===
         elif msg.name == "modulation_outdoor":
@@ -659,109 +558,13 @@ class DataAggregator:
         # === B509: Direct Room Temp (Primary Source) ===
         elif msg.name == "room_temp" and len(data) >= 2:
             if msg.source == 0x10 and data[0] != 0xFF:
-                # --- FIX: ALWAYS update if valid (Priority over Boiler) ---
-                self._set_sensor("mipro.room_temperature", data[0] / 2.0, "°C", ts,
-                               "Room Temperature (Direct)", min_v=1.0, max_v=40.0)
+                self._set_sensor("boiler.room_temperature", data[0] / 2.0, "°C", ts,
+                               "Room Temperature (Controller)", min_v=1.0, max_v=40.0)
             elif msg.source == 0x08:
                 if data[0] != 0xFF:
                     self._set_modulation(data[0], ts, "B509_B0", raw_byte=data[0])
                 if len(resp) >= 1 and resp[0] != 0xFF:
                     self._set_modulation(resp[0], ts, "B509_R0", raw_byte=resp[0])
-
-        # === B513/B514/B515/B517-B51A: Historical counters/logs ===
-        elif msg.name in (
-            "history_stats",
-            "history_programs",
-            "error_history",
-            "history_stats_ext_17",
-            "history_stats_ext_18",
-            "history_stats_ext_19",
-            "history_stats_ext_1a",
-        ):
-            query_type: Optional[int] = data[0] if len(data) >= 1 else None
-            query_hex = data.hex() if len(data) >= 1 else ""
-            if not resp:
-                return
-
-            command_suffix = telegram.secondary_command
-            base_prefix = f"history.b5{command_suffix:02x}"
-            sensor_prefix = base_prefix
-            if query_hex:
-                sensor_prefix = f"{base_prefix}.q{query_hex}"
-            label = f"B5{command_suffix:02X}"
-
-            # Keep raw payload and compact candidate lists for reverse engineering.
-            self._publish_history_candidates(
-                sensor_prefix,
-                resp,
-                ts,
-                label,
-                query_type=query_type,
-                query_hex=query_hex,
-            )
-
-            # Expose first words/dwords as explicit sensors for charting in HA.
-            u16_values: List[tuple] = []
-            for offset in range(0, min(len(resp) - 1, 8), 2):
-                value_u16 = int.from_bytes(resp[offset:offset + 2], "little")
-                if value_u16 not in (0x0000, 0xFFFF):
-                    u16_values.append((offset, value_u16))
-                    self._set_sensor(
-                        f"{sensor_prefix}_u16_{offset}",
-                        value_u16,
-                        "",
-                        ts,
-                        f"{label} uint16[{offset}]",
-                        persistent=True,
-                    )
-
-            u32_values: List[tuple] = []
-            for offset in range(0, min(len(resp) - 3, 16), 4):
-                value_u32 = int.from_bytes(resp[offset:offset + 4], "little")
-                if value_u32 not in (0x00000000, 0xFFFFFFFF):
-                    u32_values.append((offset, value_u32))
-                    self._set_sensor(
-                        f"{sensor_prefix}_u32_{offset}",
-                        value_u32,
-                        "",
-                        ts,
-                        f"{label} uint32[{offset}]",
-                        persistent=True,
-                    )
-
-            # Best-effort kWh decoding guesses.
-            # Many eBUS counters use fixed-point scale (x10 or x100).
-            for rank, (offset, value_u32) in enumerate(u32_values[:2]):
-                if 100 <= value_u32 <= 4000000000:
-                    self._set_sensor(
-                        f"{sensor_prefix}_kwh_guess_div10_{rank}",
-                        round(value_u32 / 10.0, 1),
-                        "kWh",
-                        ts,
-                        f"{label} guess from uint32[{offset}] / 10",
-                        persistent=True,
-                    )
-                if 1000 <= value_u32 <= 4000000000:
-                    self._set_sensor(
-                        f"{sensor_prefix}_kwh_guess_div100_{rank}",
-                        round(value_u32 / 100.0, 2),
-                        "kWh",
-                        ts,
-                        f"{label} guess from uint32[{offset}] / 100",
-                        persistent=True,
-                    )
-
-            # For shorter blocks exposing only uint16 values, provide basic kWh guess.
-            for rank, (offset, value_u16) in enumerate(u16_values[:2]):
-                if 10 <= value_u16 <= 100000:
-                    self._set_sensor(
-                        f"{sensor_prefix}_kwh_guess_u16_div10_{rank}",
-                        round(value_u16 / 10.0, 1),
-                        "kWh",
-                        ts,
-                        f"{label} guess from uint16[{offset}] / 10",
-                        persistent=True,
-                    )
 
     def _set_sensor(self, name: str, value: Any, unit: str,
                    timestamp: datetime, description: str = "",
@@ -816,17 +619,12 @@ class DataAggregator:
         print("=" * 70)
 
         boiler = {k.replace("boiler.", ""): v for k, v in sensors.items() if k.startswith("boiler.")}
-        mipro = {k.replace("mipro.", ""): v for k, v in sensors.items() if k.startswith("mipro.")}
 
         if boiler:
             print("\n🔥 BOILER:")
             for k, v in boiler.items():
                 self._print_sensor(k, v)
 
-        if mipro:
-            print("\n📱 MIPRO:")
-            for k, v in mipro.items():
-                self._print_sensor(k, v)
         print("\n" + "=" * 70)
 
     def _print_sensor(self, name: str, data: Dict) -> None:

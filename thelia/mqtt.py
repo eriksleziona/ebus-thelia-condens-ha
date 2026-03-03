@@ -45,6 +45,12 @@ class HAMqttClient:
                 "icon": "mdi:sun-thermometer",
                 "state_class": "measurement",
             },
+            "boiler.room_temperature": {
+                "name": "Room Temperature",
+                "class": "temperature",
+                "icon": "mdi:home-thermometer",
+                "state_class": "measurement",
+            },
             "boiler.water_pressure": {
                 "name": "System Pressure",
                 "class": "pressure",
@@ -55,6 +61,12 @@ class HAMqttClient:
                 "name": "Burner Modulation",
                 "unit": "%",
                 "icon": "mdi:fire",
+                "state_class": "measurement",
+            },
+            "boiler.burner_power_percent": {
+                "name": "Burner Power",
+                "unit": "%",
+                "icon": "mdi:fire-circle",
                 "state_class": "measurement",
             },
             "boiler.burner_modulation_q2": {
@@ -84,16 +96,16 @@ class HAMqttClient:
                 "icon": "mdi:vector-difference-ba",
                 "state_class": "measurement",
             },
-            "mipro.dhw_setpoint": {
-                "name": "DHW Setpoint (Target)",
+            "boiler.dhw_setpoint_active": {
+                "name": "DHW Setpoint Active",
                 "class": "temperature",
                 "icon": "mdi:thermostat",
                 "state_class": "measurement",
             },
-            "mipro.room_temperature": {
-                "name": "MiPro Room Temperature",
+            "boiler.max_flow_temp_limit": {
+                "name": "Max Flow Temp Limit",
                 "class": "temperature",
-                "icon": "mdi:sofa",
+                "icon": "mdi:thermometer-high",
                 "state_class": "measurement",
             },
             "boiler.flame_on": {
@@ -176,6 +188,26 @@ class HAMqttClient:
                 "type": "binary_sensor",
                 "icon": "mdi:pump",
             },
+            "boiler.state_code": {
+                "name": "Boiler State Code",
+                "icon": "mdi:counter",
+                "state_class": "measurement",
+            },
+            "boiler.b511_q1_byte3_raw": {
+                "name": "B511 Q1 Byte3 Raw",
+                "icon": "mdi:code-braces",
+                "state_class": "measurement",
+            },
+            "boiler.b511_q1_byte4_raw": {
+                "name": "B511 Q1 Byte4 Raw",
+                "icon": "mdi:code-braces",
+                "state_class": "measurement",
+            },
+            "boiler.b511_q2_byte4_raw": {
+                "name": "B511 Q2 Byte4 Raw",
+                "icon": "mdi:code-braces",
+                "state_class": "measurement",
+            },
             "boiler.heating_active": {
                 "name": "Heating Mode",
                 "type": "binary_sensor",
@@ -193,7 +225,7 @@ class HAMqttClient:
             "identifiers": ["saunier_duval_thelia_condens"],
             "name": "Saunier Duval Thelia Condens",
             "manufacturer": "Saunier Duval",
-            "model": "Thelia Condens + MiPro",
+            "model": "Thelia Condens",
         }
 
     def _build_discovery_payload(self, sensor_key: str, config: Dict[str, Any]) -> Tuple[str, str, Dict[str, Any]]:

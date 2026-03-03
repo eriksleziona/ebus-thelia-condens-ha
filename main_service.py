@@ -19,68 +19,14 @@ STATUS_STALE_THRESHOLD_SECONDS = 120.0
 
 PUBLISH_INTERVAL_SECONDS = 5
 STATUS_POLL_INTERVAL_SECONDS = 60
+TEMPERATURE_POLL_INTERVAL_SECONDS = 65
 MODULATION_POLL_INTERVAL_SECONDS = 75
-HISTORY_POLL_INTERVAL_SECONDS = 10
 
 POLL_SOURCE_ADDR = 0x30
 POLL_DEST_ADDR = 0x08
-MIPRO_DEST_ADDR = 0x10
 STATUS_QUERY_TYPE_0 = bytes([0x00])  # B511/00: status, pressure, flags
+STATUS_QUERY_TYPE_1 = bytes([0x01])  # B511/01: live temperatures
 STATUS_QUERY_TYPE_2 = bytes([0x02])  # B511/02: modulation/setpoints
-HISTORY_INDEX_MAX = 12
-
-
-def _build_history_query_sequence():
-    """
-    Build a mixed query list:
-    - direct single-byte query types
-    - indexed two-byte variants (query_type + index) for month/day buckets.
-    """
-    sequence = []
-    history_targets = (MIPRO_DEST_ADDR, POLL_DEST_ADDR)
-    single_queries = (
-        (0x13, bytes([0x00])),
-        (0x13, bytes([0x01])),
-        (0x13, bytes([0x02])),
-        (0x13, bytes([0x03])),
-        (0x13, bytes([0x04])),
-        (0x13, bytes([0x05])),
-        (0x14, bytes([0x00])),
-        (0x15, bytes([0x00])),
-        (0x15, bytes([0x01])),
-        (0x17, bytes([0x00])),
-        (0x18, bytes([0x00])),
-        (0x19, bytes([0x00])),
-        (0x1A, bytes([0x00])),
-    )
-
-    # Interleave targets so MiPro (0x10) is queried immediately.
-    for secondary_command, payload in single_queries:
-        for destination in history_targets:
-            sequence.append((destination, secondary_command, payload))
-
-    # Indexed history windows, likely required for month/day breakdown pages.
-    for idx in range(HISTORY_INDEX_MAX + 1):
-        for qtype in (0x00, 0x01, 0x02, 0x03, 0x04, 0x05):
-            for destination in history_targets:
-                sequence.append((destination, 0x13, bytes([qtype, idx])))
-        for qtype in (0x00, 0x01):
-            for destination in history_targets:
-                sequence.append((destination, 0x15, bytes([qtype, idx])))
-
-    return tuple(sequence)
-
-
-HISTORY_QUERY_SEQUENCE = _build_history_query_sequence()
-HISTORY_MESSAGE_NAMES = {
-    "history_stats",
-    "history_programs",
-    "error_history",
-    "history_stats_ext_17",
-    "history_stats_ext_18",
-    "history_stats_ext_19",
-    "history_stats_ext_1a",
-}
 
 
 logging.basicConfig(
@@ -123,9 +69,8 @@ def main():
 
     last_publish = 0.0
     last_status_poll = 0.0
+    last_temperature_poll = 0.0
     last_modulation_poll = 0.0
-    last_history_poll = 0.0
-    history_query_index = 0
 
     try:
         for telegram in connection.telegram_generator():
@@ -142,6 +87,8 @@ def main():
             # Natural updates reset poll cooldowns.
             if msg.name == "status_temps" and msg.query_data.get("query_type") == 0:
                 last_status_poll = now
+            if msg.name == "status_temps" and msg.query_data.get("query_type") == 1:
+                last_temperature_poll = now
             if (
                 (msg.name == "status_temps" and msg.query_data.get("query_type") == 2)
                 or msg.name == "modulation_outdoor"
@@ -155,23 +102,6 @@ def main():
                 or msg.name == "modulation_outdoor"
                 or (msg.name == "room_temp" and msg.source == 0x08)
             ):
-                if sensors:
-                    mqtt_client.publish_sensors(sensors)
-                last_publish = now
-
-            # Push history data immediately when new historical block is received.
-            if msg.name in HISTORY_MESSAGE_NAMES:
-                if msg.raw_telegram is not None:
-                    resp_len = len(msg.raw_telegram.response_data or b"")
-                    resp_hex = (msg.raw_telegram.response_data or b"").hex()
-                    if resp_len > 0:
-                        logger.info(
-                            f"History response {msg.name} src=0x{msg.source:02X} dst=0x{msg.destination:02X} q={msg.raw_telegram.data.hex()} resp_len={resp_len} resp_hex={resp_hex}"
-                        )
-                    else:
-                        logger.info(
-                            f"History poll echo/no-data {msg.name} src=0x{msg.source:02X} dst=0x{msg.destination:02X} q={msg.raw_telegram.data.hex()}"
-                        )
                 if sensors:
                     mqtt_client.publish_sensors(sensors)
                 last_publish = now
@@ -214,6 +144,19 @@ def main():
                     logger.info("Sent active poll B511/00")
                     last_status_poll = now
 
+            if (now - last_temperature_poll) >= TEMPERATURE_POLL_INTERVAL_SECONDS:
+                if connection.send_query(
+                    source=POLL_SOURCE_ADDR,
+                    destination=POLL_DEST_ADDR,
+                    primary_command=0xB5,
+                    secondary_command=0x11,
+                    data=STATUS_QUERY_TYPE_1,
+                    prepend_sync=True,
+                    append_sync=True,
+                ):
+                    logger.info("Sent active poll B511/01")
+                    last_temperature_poll = now
+
             if should_poll_modulation and (now - last_modulation_poll) >= MODULATION_POLL_INTERVAL_SECONDS:
                 if connection.send_query(
                     source=POLL_SOURCE_ADDR,
@@ -226,23 +169,6 @@ def main():
                 ):
                     logger.info("Sent active poll B511/02")
                     last_modulation_poll = now
-
-            if HISTORY_QUERY_SEQUENCE and (now - last_history_poll) >= HISTORY_POLL_INTERVAL_SECONDS:
-                destination, secondary_command, payload = HISTORY_QUERY_SEQUENCE[history_query_index % len(HISTORY_QUERY_SEQUENCE)]
-                if connection.send_query(
-                    source=POLL_SOURCE_ADDR,
-                    destination=destination,
-                    primary_command=0xB5,
-                    secondary_command=secondary_command,
-                    data=payload,
-                    prepend_sync=True,
-                    append_sync=True,
-                ):
-                    logger.info(
-                        f"Sent history poll dst=0x{destination:02X} B5{secondary_command:02X} payload={payload.hex()}"
-                    )
-                    last_history_poll = now
-                    history_query_index += 1
 
     except KeyboardInterrupt:
         logger.info("Stopping...")
