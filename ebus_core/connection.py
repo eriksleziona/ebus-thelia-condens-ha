@@ -3,9 +3,11 @@
 import serial
 import logging
 import time
+import threading
 from dataclasses import dataclass
 from typing import Optional, Generator, Callable, List
 
+from .crc import EbusCRC
 from .telegram import TelegramParser, EbusTelegram
 
 
@@ -31,6 +33,7 @@ class SerialConnection:
 
         self._telegram_callbacks: List[Callable[[EbusTelegram], None]] = []
         self._raw_callbacks: List[Callable[[bytes], None]] = []
+        self._io_lock = threading.RLock()
 
     @property
     def connected(self) -> bool:
@@ -101,6 +104,129 @@ class SerialConnection:
             return telegrams
 
         return []
+
+    @staticmethod
+    def build_query_frame(
+        source: int,
+        destination: int,
+        primary_command: int,
+        secondary_command: int,
+        data: bytes = b"",
+    ) -> bytes:
+        """Build a master query frame (without SYNC bytes)."""
+        payload = bytes(data or b"")
+        if len(payload) > 255:
+            raise ValueError("eBUS payload too long (>255 bytes)")
+
+        header = bytes(
+            [
+                source & 0xFF,
+                destination & 0xFF,
+                primary_command & 0xFF,
+                secondary_command & 0xFF,
+                len(payload) & 0xFF,
+            ]
+        ) + payload
+        crc = EbusCRC.calculate(header)
+        return header + bytes([crc])
+
+    def send_query(
+        self,
+        source: int,
+        destination: int,
+        primary_command: int,
+        secondary_command: int,
+        data: bytes = b"",
+        prepend_sync: bool = True,
+        append_sync: bool = True,
+        flush_input: bool = False,
+    ) -> bool:
+        """
+        Send an eBUS query frame on the serial interface.
+        Returns True when write succeeds.
+        """
+        if not self.connected:
+            self.logger.warning("send_query called while disconnected")
+            return False
+
+        frame = self.build_query_frame(source, destination, primary_command, secondary_command, data=data)
+        wire_data = frame
+        if prepend_sync:
+            wire_data = bytes([TelegramParser.SYNC_BYTE]) + wire_data
+        if append_sync:
+            wire_data = wire_data + bytes([TelegramParser.SYNC_BYTE])
+
+        try:
+            with self._io_lock:
+                if flush_input and self._serial is not None:
+                    try:
+                        self._serial.reset_input_buffer()
+                    except Exception:
+                        # Some serial backends may not implement it; query can still proceed.
+                        pass
+
+                if self._serial is None:
+                    return False
+                self._serial.write(wire_data)
+                self._serial.flush()
+
+            self.logger.debug(
+                "Sent query src=0x%02X dst=0x%02X cmd=%02X%02X data=%s",
+                source & 0xFF,
+                destination & 0xFF,
+                primary_command & 0xFF,
+                secondary_command & 0xFF,
+                (data or b"").hex(),
+            )
+            return True
+        except serial.SerialException as e:
+            self.logger.error(f"Write error: {e}")
+            self._connected = False
+            return False
+
+    def query_once(
+        self,
+        source: int,
+        destination: int,
+        primary_command: int,
+        secondary_command: int,
+        data: bytes = b"",
+        timeout_s: float = 1.5,
+        flush_input: bool = False,
+    ) -> Optional[EbusTelegram]:
+        """
+        Send one query and wait for a matching telegram.
+        Matching is based on source, destination, command and query payload.
+        """
+        payload = bytes(data or b"")
+        sent = self.send_query(
+            source=source,
+            destination=destination,
+            primary_command=primary_command,
+            secondary_command=secondary_command,
+            data=payload,
+            flush_input=flush_input,
+        )
+        if not sent:
+            return None
+
+        deadline = time.monotonic() + max(0.0, timeout_s)
+        while self.connected and time.monotonic() <= deadline:
+            telegrams = self.read_telegrams()
+            for telegram in telegrams:
+                if telegram.source != source:
+                    continue
+                if telegram.destination != destination:
+                    continue
+                if telegram.primary_command != primary_command or telegram.secondary_command != secondary_command:
+                    continue
+                if telegram.data != payload:
+                    continue
+                return telegram
+
+            time.sleep(0.01)
+
+        return None
 
     def telegram_generator(self) -> Generator[EbusTelegram, None, None]:
         while self.connected:

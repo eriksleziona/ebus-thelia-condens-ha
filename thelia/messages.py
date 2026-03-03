@@ -242,6 +242,64 @@ register_message(MessageDefinition(
     response_fields=[]
 ))
 
+# B513: History/Statistics (best-effort generic decoding)
+register_message(MessageDefinition(
+    name="history_stats",
+    primary_command=0xB5,
+    secondary_command=0x13,
+    description="Historical statistics and counters (generic)",
+    fields=[
+        FieldDefinition("query_type", 0, DataType.UINT8, ignore_invalid=False),
+    ],
+    response_fields=[
+        FieldDefinition("byte0", 0, DataType.UINT8, ignore_invalid=False),
+        FieldDefinition("byte1", 1, DataType.UINT8, ignore_invalid=False),
+        FieldDefinition("byte2", 2, DataType.UINT8, ignore_invalid=False),
+        FieldDefinition("byte3", 3, DataType.UINT8, ignore_invalid=False),
+        FieldDefinition("byte4", 4, DataType.UINT8, ignore_invalid=False),
+        FieldDefinition("byte5", 5, DataType.UINT8, ignore_invalid=False),
+        FieldDefinition("byte6", 6, DataType.UINT8, ignore_invalid=False),
+        FieldDefinition("byte7", 7, DataType.UINT8, ignore_invalid=False),
+        FieldDefinition("byte8", 8, DataType.UINT8, ignore_invalid=False),
+        FieldDefinition("byte9", 9, DataType.UINT8, ignore_invalid=False),
+        FieldDefinition("byte10", 10, DataType.UINT8, ignore_invalid=False),
+        FieldDefinition("byte11", 11, DataType.UINT8, ignore_invalid=False),
+        FieldDefinition("byte12", 12, DataType.UINT8, ignore_invalid=False),
+        FieldDefinition("byte13", 13, DataType.UINT8, ignore_invalid=False),
+        FieldDefinition("byte14", 14, DataType.UINT8, ignore_invalid=False),
+        FieldDefinition("byte15", 15, DataType.UINT8, ignore_invalid=False),
+    ]
+))
+
+# B515: Error/History (best-effort generic decoding)
+register_message(MessageDefinition(
+    name="error_history",
+    primary_command=0xB5,
+    secondary_command=0x15,
+    description="Error and history records (generic)",
+    fields=[
+        FieldDefinition("query_type", 0, DataType.UINT8, ignore_invalid=False),
+    ],
+    response_fields=[
+        FieldDefinition("byte0", 0, DataType.UINT8, ignore_invalid=False),
+        FieldDefinition("byte1", 1, DataType.UINT8, ignore_invalid=False),
+        FieldDefinition("byte2", 2, DataType.UINT8, ignore_invalid=False),
+        FieldDefinition("byte3", 3, DataType.UINT8, ignore_invalid=False),
+        FieldDefinition("byte4", 4, DataType.UINT8, ignore_invalid=False),
+        FieldDefinition("byte5", 5, DataType.UINT8, ignore_invalid=False),
+        FieldDefinition("byte6", 6, DataType.UINT8, ignore_invalid=False),
+        FieldDefinition("byte7", 7, DataType.UINT8, ignore_invalid=False),
+        FieldDefinition("byte8", 8, DataType.UINT8, ignore_invalid=False),
+        FieldDefinition("byte9", 9, DataType.UINT8, ignore_invalid=False),
+        FieldDefinition("byte10", 10, DataType.UINT8, ignore_invalid=False),
+        FieldDefinition("byte11", 11, DataType.UINT8, ignore_invalid=False),
+        FieldDefinition("byte12", 12, DataType.UINT8, ignore_invalid=False),
+        FieldDefinition("byte13", 13, DataType.UINT8, ignore_invalid=False),
+        FieldDefinition("byte14", 14, DataType.UINT8, ignore_invalid=False),
+        FieldDefinition("byte15", 15, DataType.UINT8, ignore_invalid=False),
+    ]
+))
+
 # B509: Room Temperature
 register_message(MessageDefinition(
     name="room_temp",

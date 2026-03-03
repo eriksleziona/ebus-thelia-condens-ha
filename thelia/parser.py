@@ -426,6 +426,46 @@ class DataAggregator:
 
         self._publish_flame_metrics(timestamp)
 
+    def _publish_history_candidates(
+        self,
+        sensor_prefix: str,
+        response: bytes,
+        timestamp: datetime,
+        label: str,
+        query_type: Optional[int] = None,
+    ) -> None:
+        if query_type is not None:
+            self._set_sensor(f"{sensor_prefix}_query_type", query_type, "", timestamp, f"{label} query type")
+        self._set_sensor(f"{sensor_prefix}_response_len", len(response), "B", timestamp, f"{label} response length")
+        self._set_sensor(f"{sensor_prefix}_raw_hex", response.hex(), "", timestamp, f"{label} raw payload")
+
+        u16_candidates: List[str] = []
+        for offset in range(0, len(response) - 1, 2):
+            value = int.from_bytes(response[offset:offset + 2], "little")
+            if value not in (0x0000, 0xFFFF):
+                u16_candidates.append(f"{offset}:{value}")
+
+        u32_candidates: List[str] = []
+        for offset in range(0, len(response) - 3, 4):
+            value = int.from_bytes(response[offset:offset + 4], "little")
+            if value not in (0x00000000, 0xFFFFFFFF):
+                u32_candidates.append(f"{offset}:{value}")
+
+        self._set_sensor(
+            f"{sensor_prefix}_u16_candidates",
+            ",".join(u16_candidates) if u16_candidates else "none",
+            "",
+            timestamp,
+            f"{label} non-empty uint16 values",
+        )
+        self._set_sensor(
+            f"{sensor_prefix}_u32_candidates",
+            ",".join(u32_candidates) if u32_candidates else "none",
+            "",
+            timestamp,
+            f"{label} non-empty uint32 values",
+        )
+
     def _extract_sensors(self, msg: ParsedMessage, telegram: EbusTelegram) -> None:
         ts = msg.timestamp
         data = telegram.data or b''
