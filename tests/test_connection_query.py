@@ -24,6 +24,26 @@ class _DummySerial:
         self.reset_calls += 1
 
 
+class _ReadableDummySerial(_DummySerial):
+    def __init__(self, payloads):
+        super().__init__()
+        self._payloads = [bytes(payload) for payload in payloads]
+
+    @property
+    def in_waiting(self):
+        if not self._payloads:
+            return 0
+        return len(self._payloads[0])
+
+    def read(self, size):
+        if not self._payloads:
+            return b""
+        return self._payloads.pop(0)
+
+    def close(self):
+        self.is_open = False
+
+
 def _connection_with_dummy_serial():
     conn = SerialConnection(ConnectionConfig())
     conn._serial = _DummySerial()  # pylint: disable=protected-access
@@ -115,3 +135,29 @@ def test_query_once_returns_none_on_timeout():
         timeout_s=0.05,
     )
     assert reply is None
+
+
+def test_read_telegrams_tracks_last_bus_activity():
+    conn = SerialConnection(ConnectionConfig())
+    raw_frame = bytes([0x10, 0xFE, 0xB5, 0x09, 0x00, 0x00, 0xAA])
+    conn._serial = _ReadableDummySerial([raw_frame])  # pylint: disable=protected-access
+    conn._connected = True  # pylint: disable=protected-access
+
+    telegrams = conn.read_telegrams()
+
+    assert len(telegrams) == 1
+    assert conn.seconds_since_last_activity(conn._last_raw_activity_monotonic) == 0.0  # pylint: disable=protected-access
+    assert conn.seconds_since_last_telegram(conn._last_telegram_monotonic) == 0.0  # pylint: disable=protected-access
+
+
+def test_disconnect_clears_activity_timestamps():
+    conn = SerialConnection(ConnectionConfig())
+    raw_frame = bytes([0x10, 0xFE, 0xB5, 0x09, 0x00, 0x00, 0xAA])
+    conn._serial = _ReadableDummySerial([raw_frame])  # pylint: disable=protected-access
+    conn._connected = True  # pylint: disable=protected-access
+
+    conn.read_telegrams()
+    conn.disconnect()
+
+    assert conn.seconds_since_last_activity() is None
+    assert conn.seconds_since_last_telegram() is None

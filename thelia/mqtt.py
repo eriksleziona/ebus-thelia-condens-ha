@@ -19,6 +19,13 @@ class HAMqttClient:
         self.connected = False
         self.discovery_sent = False
         self._discovered_entities = set()
+        self._loop_started = False
+
+        self.client.on_connect = self._on_connect
+        self.client.on_disconnect = self._on_disconnect
+        self.client.reconnect_delay_set(min_delay=1, max_delay=30)
+        self.client.will_set("ebus/thelia/status", "offline", retain=True)
+        self.client.enable_logger(self.logger)
 
         self.entity_map = {
             "boiler.flow_temperature": {
@@ -316,20 +323,33 @@ class HAMqttClient:
 
     def connect(self):
         try:
-            self.client.on_connect = self._on_connect
-            self.client.connect(self.broker, self.port, 60)
-            self.client.loop_start()
-            self.logger.info(f"Connecting to MQTT Broker {self.broker}...")
+            if not self._loop_started:
+                self.client.loop_start()
+                self._loop_started = True
+            self.client.connect_async(self.broker, self.port, 60)
+            self.logger.info(f"Starting MQTT connection loop for {self.broker}:{self.port}...")
         except Exception as e:
             self.logger.error(f"Failed to connect to MQTT: {e}")
 
     # paho-mqtt 2.0 callback signature includes "properties".
     def _on_connect(self, client, userdata, flags, rc, properties=None):
-        if rc == 0:
+        if int(rc) == 0:
             self.logger.info("Connected to MQTT Broker")
             self.connected = True
+            self.discovery_sent = False
+            self._discovered_entities.clear()
+            self.client.publish("ebus/thelia/status", "online", retain=True)
         else:
             self.logger.error(f"Failed to connect, return code {rc}")
+
+    def _on_disconnect(self, client, userdata, disconnect_flags, rc, properties=None):
+        self.connected = False
+        self.discovery_sent = False
+
+        if int(rc) == 0:
+            self.logger.info("Disconnected from MQTT Broker")
+        else:
+            self.logger.warning(f"MQTT disconnected unexpectedly, return code {rc}")
 
     def publish_discovery(self):
         """Send discovery config so Home Assistant can auto-create entities."""
@@ -340,7 +360,6 @@ class HAMqttClient:
         for sensor_key, config in self.entity_map.items():
             self._publish_discovery_for_sensor(sensor_key, config)
 
-        self.client.publish("ebus/thelia/status", "online", retain=True)
         self.discovery_sent = True
 
     def publish_sensors(self, sensors: Dict[str, Dict]):
@@ -366,3 +385,17 @@ class HAMqttClient:
             else:
                 payload = str(value)
             self.client.publish(topic, payload)
+
+    def disconnect(self):
+        """Disconnect from MQTT broker and stop background loop."""
+        try:
+            if self.connected:
+                self.client.publish("ebus/thelia/status", "offline", retain=True)
+            self.client.disconnect()
+        except Exception as e:
+            self.logger.warning(f"Failed to disconnect MQTT cleanly: {e}")
+        finally:
+            if self._loop_started:
+                self.client.loop_stop()
+                self._loop_started = False
+            self.connected = False

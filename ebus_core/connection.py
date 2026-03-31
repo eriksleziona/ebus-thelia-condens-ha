@@ -34,13 +34,18 @@ class SerialConnection:
         self._telegram_callbacks: List[Callable[[EbusTelegram], None]] = []
         self._raw_callbacks: List[Callable[[bytes], None]] = []
         self._io_lock = threading.RLock()
+        self._last_raw_activity_monotonic: Optional[float] = None
+        self._last_telegram_monotonic: Optional[float] = None
 
     @property
     def connected(self) -> bool:
-        return self._connected and self._serial and self._serial.is_open
+        return bool(self._connected and self._serial and self._serial.is_open)
 
     def connect(self) -> bool:
         try:
+            if self._serial and self._serial.is_open:
+                self._serial.close()
+
             self._serial = serial.Serial(
                 port=self.config.port,
                 baudrate=self.config.baudrate,
@@ -51,17 +56,26 @@ class SerialConnection:
             )
             self._connected = True
             self._parser.reset()
+            now = time.monotonic()
+            self._last_raw_activity_monotonic = now
+            self._last_telegram_monotonic = now
             self.logger.info(f"Connected to {self.config.port}")
             return True
-        except serial.SerialException as e:
+        except (serial.SerialException, OSError) as e:
             self.logger.error(f"Connection failed: {e}")
             self._connected = False
             return False
 
     def disconnect(self) -> None:
         if self._serial and self._serial.is_open:
-            self._serial.close()
+            try:
+                self._serial.close()
+            except (serial.SerialException, OSError) as e:
+                self.logger.warning(f"Error while closing serial port: {e}")
         self._connected = False
+        self._serial = None
+        self._last_raw_activity_monotonic = None
+        self._last_telegram_monotonic = None
         self.logger.info("Disconnected")
 
     def register_telegram_callback(self, callback: Callable[[EbusTelegram], None]) -> None:
@@ -76,9 +90,12 @@ class SerialConnection:
 
         try:
             if self._serial.in_waiting > 0:
-                return self._serial.read(self._serial.in_waiting)
+                raw = self._serial.read(self._serial.in_waiting)
+                if raw:
+                    self._last_raw_activity_monotonic = time.monotonic()
+                return raw
             return None
-        except serial.SerialException as e:
+        except (serial.SerialException, OSError) as e:
             self.logger.error(f"Read error: {e}")
             self._connected = False
             return None
@@ -93,6 +110,8 @@ class SerialConnection:
                     self.logger.error(f"Raw callback error: {e}")
 
             telegrams = self._parser.feed(raw)
+            if telegrams:
+                self._last_telegram_monotonic = time.monotonic()
 
             for telegram in telegrams:
                 for callback in self._telegram_callbacks:
@@ -179,10 +198,26 @@ class SerialConnection:
                 (data or b"").hex(),
             )
             return True
-        except serial.SerialException as e:
+        except (serial.SerialException, OSError) as e:
             self.logger.error(f"Write error: {e}")
             self._connected = False
             return False
+
+    def seconds_since_last_activity(self, now: Optional[float] = None) -> Optional[float]:
+        """Return seconds since the last raw byte was received from the bus."""
+        if self._last_raw_activity_monotonic is None:
+            return None
+
+        current = time.monotonic() if now is None else now
+        return max(0.0, current - self._last_raw_activity_monotonic)
+
+    def seconds_since_last_telegram(self, now: Optional[float] = None) -> Optional[float]:
+        """Return seconds since the last parsed telegram was received."""
+        if self._last_telegram_monotonic is None:
+            return None
+
+        current = time.monotonic() if now is None else now
+        return max(0.0, current - self._last_telegram_monotonic)
 
     def query_once(
         self,
