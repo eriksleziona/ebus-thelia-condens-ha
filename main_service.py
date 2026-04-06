@@ -21,6 +21,7 @@ PUBLISH_INTERVAL_SECONDS = 5
 STATUS_POLL_INTERVAL_SECONDS = 60
 TEMPERATURE_POLL_INTERVAL_SECONDS = 65
 MODULATION_POLL_INTERVAL_SECONDS = 75
+MQTT_HEALTHCHECK_INTERVAL_SECONDS = 60
 SERIAL_IDLE_RECONNECT_SECONDS = 180.0
 MAIN_LOOP_SLEEP_SECONDS = 0.1
 
@@ -44,6 +45,7 @@ class BridgeLoopState:
     last_status_poll_monotonic: float = 0.0
     last_temperature_poll_monotonic: float = 0.0
     last_modulation_poll_monotonic: float = 0.0
+    last_mqtt_healthcheck_monotonic: float = 0.0
     last_serial_connect_attempt_monotonic: float = 0.0
 
 
@@ -61,14 +63,19 @@ def _is_modulation_update(message) -> bool:
     )
 
 
-def _publish_sensors_safe(mqtt_client: HAMqttClient, sensors: dict, logger: logging.Logger, reason: str) -> None:
+def _publish_sensors_safe(mqtt_client: HAMqttClient, sensors: dict, logger: logging.Logger, reason: str) -> bool:
     if not sensors:
-        return
+        return True
 
     try:
-        mqtt_client.publish_sensors(sensors)
+        return bool(mqtt_client.publish_sensors(sensors))
     except Exception:
         logger.exception("MQTT publish failed during %s", reason)
+        try:
+            mqtt_client.restart(f"exception during {reason}")
+        except Exception:
+            logger.exception("MQTT restart after publish exception also failed")
+        return False
 
 
 def _process_telegrams(telegrams, parser: TheliaParser, logger: logging.Logger, loop_now: float, state: BridgeLoopState) -> bool:
@@ -165,12 +172,23 @@ def _run_maintenance_cycle(
     sensors = aggregator.get_all_sensors()
 
     if force_publish:
-        _publish_sensors_safe(mqtt_client, sensors, logger, "live update")
-        state.last_publish_monotonic = loop_now
+        if _publish_sensors_safe(mqtt_client, sensors, logger, "live update"):
+            state.last_publish_monotonic = loop_now
 
     if (loop_now - state.last_publish_monotonic) >= PUBLISH_INTERVAL_SECONDS:
-        _publish_sensors_safe(mqtt_client, sensors, logger, "periodic refresh")
-        state.last_publish_monotonic = loop_now
+        if _publish_sensors_safe(mqtt_client, sensors, logger, "periodic refresh"):
+            state.last_publish_monotonic = loop_now
+
+    if (loop_now - state.last_mqtt_healthcheck_monotonic) >= MQTT_HEALTHCHECK_INTERVAL_SECONDS:
+        try:
+            if mqtt_client.publish_healthcheck():
+                state.last_mqtt_healthcheck_monotonic = loop_now
+        except Exception:
+            logger.exception("MQTT healthcheck failed unexpectedly")
+            try:
+                mqtt_client.restart("healthcheck exception")
+            except Exception:
+                logger.exception("MQTT restart after healthcheck exception also failed")
 
     status_age_s = _sensor_value(sensors, "boiler.status_last_update_s")
     modulation_age_s = _sensor_value(sensors, "boiler.modulation_last_update_s")
