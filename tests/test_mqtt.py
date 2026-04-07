@@ -4,6 +4,8 @@
 from unittest.mock import patch
 
 import paho.mqtt.client as mqtt
+from paho.mqtt.packettypes import PacketTypes
+from paho.mqtt.reasoncodes import ReasonCode
 
 from thelia.mqtt import HAMqttClient
 
@@ -126,3 +128,30 @@ def test_publish_sensors_marks_success_timestamp():
 
     assert ok is True
     assert mqtt_client.seconds_since_last_successful_publish() is not None
+
+
+def test_on_connect_accepts_reasoncode_object():
+    healthy_client = _FakeClient()
+
+    with patch("thelia.mqtt.mqtt.Client", return_value=healthy_client):
+        mqtt_client = HAMqttClient("broker", 1883)
+        mqtt_client._loop_started = True  # pylint: disable=protected-access
+        healthy_client.connected = True
+
+        reason_code = ReasonCode(PacketTypes.CONNACK, "Success")
+        mqtt_client._on_connect(healthy_client, None, None, reason_code, None)
+
+    assert mqtt_client.connected is True
+
+
+def test_on_disconnect_accepts_reasoncode_object():
+    healthy_client = _FakeClient()
+
+    with patch("thelia.mqtt.mqtt.Client", return_value=healthy_client):
+        mqtt_client = HAMqttClient("broker", 1883)
+        mqtt_client.connected = True
+
+        reason_code = ReasonCode(PacketTypes.DISCONNECT, "Normal disconnection")
+        mqtt_client._on_disconnect(healthy_client, None, None, reason_code, None)
+
+    assert mqtt_client.connected is False

@@ -255,6 +255,29 @@ class HAMqttClient:
             "model": "Thelia Condens",
         }
 
+    @staticmethod
+    def _reason_code_value(reason_code) -> Optional[int]:
+        if reason_code is None:
+            return None
+
+        if isinstance(reason_code, bool):
+            return int(reason_code)
+
+        if isinstance(reason_code, (int, float)):
+            return int(reason_code)
+
+        value = getattr(reason_code, "value", None)
+        if isinstance(value, (int, float)):
+            return int(value)
+
+        try:
+            if reason_code == 0:
+                return 0
+        except Exception:
+            pass
+
+        return None
+
     def _build_discovery_payload(self, sensor_key: str, config: Dict[str, Any]) -> Tuple[str, str, Dict[str, Any]]:
         component = config.get("type", "sensor")
         clean_id = sensor_key.replace(".", "_")
@@ -482,7 +505,8 @@ class HAMqttClient:
 
     # paho-mqtt 2.0 callback signature includes "properties".
     def _on_connect(self, client, userdata, flags, rc, properties=None):
-        if int(rc) == 0:
+        rc_value = self._reason_code_value(rc)
+        if rc_value == 0:
             self.logger.info("Connected to MQTT Broker")
             self.connected = True
             self._ever_connected = True
@@ -502,7 +526,8 @@ class HAMqttClient:
         self.connected = False
         self.discovery_sent = False
 
-        if int(rc) == 0:
+        rc_value = self._reason_code_value(rc)
+        if rc_value == 0:
             self.logger.info("Disconnected from MQTT Broker")
         else:
             self.logger.warning(f"MQTT disconnected unexpectedly, return code {rc}")
