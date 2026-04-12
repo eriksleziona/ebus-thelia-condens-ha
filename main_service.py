@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 import logging
+import os
 import time
 from dataclasses import dataclass
 
 from ebus_core.connection import ConnectionConfig, SerialConnection
+from thelia.adapter_reset import AdapterResetConfig, AdapterResetController
 from thelia.mqtt import HAMqttClient
 from thelia.parser import DataAggregator, TheliaParser
 
@@ -24,6 +26,11 @@ MODULATION_POLL_INTERVAL_SECONDS = 75
 MQTT_HEALTHCHECK_INTERVAL_SECONDS = 60
 SERIAL_IDLE_RECONNECT_SECONDS = 180.0
 MAIN_LOOP_SLEEP_SECONDS = 0.1
+ADAPTER_RESET_COMMAND = os.getenv("EBUS_ADAPTER_RESET_COMMAND", "").strip()
+ADAPTER_RESET_AFTER_IDLE_DISCONNECTS = max(1, int(os.getenv("EBUS_ADAPTER_RESET_AFTER_IDLE_DISCONNECTS", "2")))
+ADAPTER_RESET_COOLDOWN_SECONDS = max(0.0, float(os.getenv("EBUS_ADAPTER_RESET_COOLDOWN_SECONDS", "900")))
+ADAPTER_RESET_SETTLE_SECONDS = max(0.0, float(os.getenv("EBUS_ADAPTER_RESET_SETTLE_SECONDS", "20")))
+ADAPTER_RESET_TIMEOUT_SECONDS = max(1.0, float(os.getenv("EBUS_ADAPTER_RESET_TIMEOUT_SECONDS", "30")))
 
 POLL_SOURCE_ADDR = 0x30
 POLL_DEST_ADDR = 0x08
@@ -46,7 +53,9 @@ class BridgeLoopState:
     last_temperature_poll_monotonic: float = 0.0
     last_modulation_poll_monotonic: float = 0.0
     last_mqtt_healthcheck_monotonic: float = 0.0
+    adapter_reset_resume_at_monotonic: float = 0.0
     last_serial_connect_attempt_monotonic: float = 0.0
+    consecutive_idle_disconnects: int = 0
 
 
 def _sensor_value(sensors: dict, key: str):
@@ -80,6 +89,8 @@ def _publish_sensors_safe(mqtt_client: HAMqttClient, sensors: dict, logger: logg
 
 def _process_telegrams(telegrams, parser: TheliaParser, logger: logging.Logger, loop_now: float, state: BridgeLoopState) -> bool:
     force_publish = False
+    if telegrams:
+        state.consecutive_idle_disconnects = 0
 
     for telegram in telegrams:
         try:
@@ -146,19 +157,61 @@ def _ensure_serial_connection(
     return False
 
 
+def _bridge_paused_for_adapter_reset(state: BridgeLoopState, loop_now: float) -> bool:
+    return loop_now < state.adapter_reset_resume_at_monotonic
+
+
+def _maybe_reset_adapter(
+    connection: SerialConnection,
+    reset_controller: AdapterResetController,
+    state: BridgeLoopState,
+    logger: logging.Logger,
+    loop_now: float,
+) -> bool:
+    if not reset_controller.enabled:
+        return False
+
+    if state.consecutive_idle_disconnects < ADAPTER_RESET_AFTER_IDLE_DISCONNECTS:
+        return False
+
+    if not reset_controller.can_reset(loop_now):
+        logger.warning(
+            "Adapter reset skipped due to cooldown, %.1fs remaining",
+            reset_controller.seconds_until_reset_allowed(loop_now),
+        )
+        return False
+
+    if reset_controller.reset(
+        f"{state.consecutive_idle_disconnects} consecutive idle disconnects after no eBUS activity"
+    ):
+        state.adapter_reset_resume_at_monotonic = loop_now + reset_controller.config.settle_seconds
+        state.consecutive_idle_disconnects = 0
+        state.last_serial_connect_attempt_monotonic = loop_now
+        state.last_publish_monotonic = 0.0
+        state.last_status_poll_monotonic = 0.0
+        state.last_temperature_poll_monotonic = 0.0
+        state.last_modulation_poll_monotonic = 0.0
+        return True
+
+    return False
+
+
 def _run_maintenance_cycle(
     connection: SerialConnection,
     parser: TheliaParser,
     aggregator: DataAggregator,
     mqtt_client: HAMqttClient,
+    reset_controller: AdapterResetController,
     state: BridgeLoopState,
     logger: logging.Logger,
     loop_now: float,
 ) -> None:
     idle_seconds = connection.seconds_since_last_activity(loop_now)
     if idle_seconds is not None and idle_seconds >= SERIAL_IDLE_RECONNECT_SECONDS:
+        state.consecutive_idle_disconnects += 1
         logger.warning("No eBUS activity for %.1fs. Recycling serial connection.", idle_seconds)
         connection.disconnect()
+        _maybe_reset_adapter(connection, reset_controller, state, logger, loop_now)
         return
 
     try:
@@ -239,21 +292,49 @@ def main():
 
     mqtt_client = HAMqttClient(MQTT_BROKER, MQTT_PORT, MQTT_USER, MQTT_PASS)
     mqtt_client.connect()
+    reset_controller = AdapterResetController(
+        AdapterResetConfig(
+            command=ADAPTER_RESET_COMMAND,
+            cooldown_seconds=ADAPTER_RESET_COOLDOWN_SECONDS,
+            settle_seconds=ADAPTER_RESET_SETTLE_SECONDS,
+            timeout_seconds=ADAPTER_RESET_TIMEOUT_SECONDS,
+        )
+    )
 
     parser.register_callback(aggregator.update)
 
     logger.info("System running. Monitoring traffic, polling stale data and auto-recovering after bus silence.")
+    if reset_controller.enabled:
+        logger.info(
+            "Adapter hardware reset hook enabled after %s idle disconnects (cooldown %.0fs, settle %.0fs)",
+            ADAPTER_RESET_AFTER_IDLE_DISCONNECTS,
+            ADAPTER_RESET_COOLDOWN_SECONDS,
+            ADAPTER_RESET_SETTLE_SECONDS,
+        )
     state = BridgeLoopState()
 
     try:
         while True:
             loop_now = time.monotonic()
 
+            if _bridge_paused_for_adapter_reset(state, loop_now):
+                time.sleep(MAIN_LOOP_SLEEP_SECONDS)
+                continue
+
             if not _ensure_serial_connection(connection, logger, state, loop_now):
                 time.sleep(MAIN_LOOP_SLEEP_SECONDS)
                 continue
 
-            _run_maintenance_cycle(connection, parser, aggregator, mqtt_client, state, logger, loop_now)
+            _run_maintenance_cycle(
+                connection,
+                parser,
+                aggregator,
+                mqtt_client,
+                reset_controller,
+                state,
+                logger,
+                loop_now,
+            )
             time.sleep(MAIN_LOOP_SLEEP_SECONDS)
 
     except KeyboardInterrupt:
